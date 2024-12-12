@@ -186,13 +186,24 @@ class FinancialEnv(gym.Env):
         self.returns_history = None
         self.prices_history = None
         self.previous_weights = None
+        
+        # Add episode tracking
+        self.episode_returns = []
+        self.episode_start_idx = None
+        self.episode_end_idx = None
 
     def reset(self, seed=None, options=None):
-        """Reset environment to start from window_size day"""
+        """Reset environment to start new episode"""
         super().reset(seed=seed)
         
-        # Start from window_size day
-        self.current_idx = self.config.window_size
+        # Reset episode tracking
+        self.episode_returns = []
+        
+        # Randomly select starting point that allows for a full episode
+        max_start = len(self.full_returns) - (self.config.window_size + self.config.max_steps * self.config.prediction_days)
+        self.current_idx = self.np_random.integers(self.config.window_size, max_start) if max_start > self.config.window_size else self.config.window_size
+        
+        self.episode_start_idx = self.current_idx
         self.current_step = 0
         
         # Initialize histories with actual data
@@ -207,13 +218,12 @@ class FinancialEnv(gym.Env):
         
         return self._get_observation(), {}
     
-    def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
-        """Execute one step, applying weights for K days"""
+    def step(self, action: np.ndarray):
+        """Execute one step, applying weights for prediction_days"""
         try:
-            # Normalize action to valid portfolio weights
             weights = self._normalize_weights(action)
             
-            # Calculate returns for the next K days
+            # Calculate returns for the prediction period
             k_day_returns = []
             k_day_prices = []
             
@@ -222,22 +232,18 @@ class FinancialEnv(gym.Env):
                 if day_idx >= len(self.full_returns):
                     break
                     
-                # Calculate daily return
                 daily_return = np.dot(weights, self.full_returns[day_idx])
                 k_day_returns.append(daily_return)
                 k_day_prices.append(self.full_prices[day_idx])
+                
+            # Store returns for episode tracking
+            self.episode_returns.extend(k_day_returns)
             
-            # Calculate average return over K days
-            if k_day_returns:
-                portfolio_return = np.mean(k_day_returns)
-            else:
-                portfolio_return = 0.0
-            
-            # Update current index and histories
+            # Update current index and step counter
             self.current_idx += self.config.prediction_days
             self.current_step += 1
             
-            # Update histories with the most recent window
+            # Update histories
             if self.current_idx < len(self.full_returns):
                 self.returns_history = self.full_returns[
                     self.current_idx - self.config.window_size:self.current_idx
@@ -249,32 +255,53 @@ class FinancialEnv(gym.Env):
             # Calculate reward
             reward = self._calculate_reward(weights)
             
-            # Get new observation
-            observation = self._get_observation()
-            
             # Check if episode is done
-            done = (self.current_idx >= len(self.full_returns) - self.config.prediction_days or 
-                   self.current_step >= self.config.max_steps)
+            done = (self.current_idx >= len(self.full_returns) - self.config.prediction_days)
             
-            # Store info
+            if done:
+                self.episode_end_idx = self.current_idx
+            
+            # Calculate episode metrics
+            episode_metrics = self._get_episode_metrics() if done else {}
+            
             info = {
-                'portfolio_return': float(portfolio_return),
+                'portfolio_return': float(np.mean(k_day_returns)) if k_day_returns else 0.0,
                 'weights': weights.tolist(),
                 'reward_components': self._get_reward_components(weights),
-                'k_day_returns': k_day_returns
+                'k_day_returns': k_day_returns,
+                'current_idx': self.current_idx,
+                'episode_start': self.episode_start_idx,
+                'episode_end': self.episode_end_idx if done else None,
+                'current_step': self.current_step,
+                **episode_metrics
             }
             
             self.previous_weights = weights.copy()
             
-            return observation, reward, done, False, info
+            return self._get_observation(), reward, done, False, info
             
         except Exception as e:
-            print(f"Warning: Error in step: {e}")
-            return self._get_observation(), -1.0, True, False, {
-                'portfolio_return': 0.0,
-                'weights': np.ones(self.config.num_assets).tolist() / self.config.num_assets,
-                'reward_components': {'error': -1.0}
-            }
+            print(f"Error in step: {e}")
+            return self._get_observation(), -1.0, True, False, {}
+            
+    def _get_episode_metrics(self) -> dict:
+        """Calculate episode-level metrics"""
+        if not self.episode_returns:
+            return {}
+            
+        episode_returns = np.array(self.episode_returns)
+        cumulative_return = np.prod(1 + episode_returns) - 1
+        mean_return = np.mean(episode_returns)
+        std_return = np.std(episode_returns)
+        sharpe = mean_return / (std_return + 1e-6)
+        
+        return {
+            'episode_cumulative_return': float(cumulative_return),
+            'episode_mean_return': float(mean_return),
+            'episode_sharpe': float(sharpe),
+            'episode_length': len(episode_returns),
+            'episode_volatility': float(std_return)
+        }
     
     def _normalize_weights(self, weights: np.ndarray) -> np.ndarray:
         """Normalize weights to sum to 1 with bounds"""

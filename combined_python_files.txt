@@ -1,0 +1,1873 @@
+# Contents of .\black_litterman.py
+import numpy as np
+import pandas as pd
+from scipy.linalg import sqrtm
+from typing import Optional, Tuple, Union
+import warnings
+
+class BlackLittermanModel:
+    def __init__(self, num_assets: int, window_size: int = 20, 
+                 risk_free_rate: float = 0.02, market_return: float = 0.08,
+                 risk_aversion: float = 2.0, tau: float = 0.05,
+                 decay_factor: float = 0.94, regularization_factor: float = 1e-6,
+                 use_exponential_weights: bool = True):
+        """Enhanced initialization with additional parameters"""
+        self.num_assets = num_assets
+        self.window_size = window_size
+        self.risk_free_rate = risk_free_rate
+        self.market_return = market_return
+        self.risk_aversion = risk_aversion
+        self.tau = tau
+        self.decay_factor = decay_factor
+        self.regularization_factor = regularization_factor
+        self.use_exponential_weights = use_exponential_weights
+
+    def _prepare_returns(self, returns: np.ndarray) -> np.ndarray:
+        """Prepare and validate returns data"""
+        if returns.ndim == 1:
+            returns = returns.reshape(-1, self.num_assets)
+        elif returns.shape[1] != self.num_assets:
+            raise ValueError(f"Expected {self.num_assets} assets, got {returns.shape[1]}")
+        
+        if len(returns) < 2:
+            raise ValueError("Insufficient data points")
+            
+        return returns
+
+    def _calculate_weights(self, length: int) -> np.ndarray:
+        """Calculate time decay weights"""
+        if self.use_exponential_weights:
+            weights = np.power(self.decay_factor, np.arange(length-1, -1, -1))
+            return weights / weights.sum()
+        return np.ones(length) / length
+
+    def _calculate_prior(self, returns: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Enhanced prior calculation with weights"""
+        try:
+            returns = self._prepare_returns(returns)
+            weights = self._calculate_weights(len(returns))
+            
+            # Calculate weighted covariance
+            weighted_returns = returns * weights.reshape(-1, 1)
+            weighted_mean = weighted_returns.sum(axis=0)
+            centered_returns = returns - weighted_mean
+            cov_matrix = (centered_returns.T @ (centered_returns * weights.reshape(-1, 1)))
+            
+            # Ensure positive definiteness
+            cov_matrix = cov_matrix + np.eye(self.num_assets) * self.regularization_factor
+            
+            # Calculate market parameters
+            market_premium = self.market_return - self.risk_free_rate
+            mkt_weights = np.ones(self.num_assets) / self.num_assets
+            
+            # Calculate betas
+            market_var = mkt_weights @ cov_matrix @ mkt_weights
+            betas = (cov_matrix @ mkt_weights) / market_var
+            
+            # Calculate prior returns
+            prior_returns = self.risk_free_rate + betas * market_premium
+            
+            return prior_returns, cov_matrix
+            
+        except Exception as e:
+            warnings.warn(f"Prior calculation failed: {str(e)}")
+            return self._get_default_parameters()
+
+    def _get_default_parameters(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Get default parameters when calculations fail"""
+        return (np.ones(self.num_assets) * self.risk_free_rate,
+                np.eye(self.num_assets) * 0.01)
+
+    def _incorporate_views(self, prior_returns, prior_cov, returns):
+        """Incorporate investor views using recent performance"""
+        try:
+            # Use recent returns as views
+            recent_returns = returns[-5:].mean(axis=0)
+            
+            # Confidence in views (using standard error)
+            view_confidence = 1 / (returns[-5:].std(axis=0) + 1e-6)
+            
+            # Create view matrix (diagonal for asset-specific views)
+            P = np.eye(self.num_assets)
+            
+            # Create view vector
+            q = recent_returns
+            
+            # Create view uncertainty matrix
+            omega = np.diag(1 / (view_confidence + 1e-6))
+            
+            # Calculate posterior parameters
+            inv_prior_cov = np.linalg.inv(prior_cov)
+            inv_omega = np.linalg.inv(omega)
+            
+            posterior_cov = np.linalg.inv(inv_prior_cov + np.dot(P.T, np.dot(inv_omega, P)))
+            posterior_returns = posterior_cov @ (inv_prior_cov @ prior_returns + 
+                                              np.dot(P.T, np.dot(inv_omega, q)))
+            
+            return posterior_returns, posterior_cov
+            
+        except Exception as e:
+            print(f"Error in view incorporation: {e}")
+            return prior_returns, prior_cov
+    
+    def optimize(self, returns_data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Optimize portfolio using Black-Litterman model with robust handling
+        """
+        try:
+            # Ensure returns_data is numpy array with correct shape
+            returns = np.asarray(returns_data)
+            if len(returns) < 2:
+                return self._get_default_parameters()
+            
+            # Add small noise to prevent singularity
+            returns = returns + np.random.normal(0, 1e-8, returns.shape)
+            
+            # Calculate prior with regularization
+            prior_returns, prior_cov = self._calculate_prior(returns)
+            
+            # Add regularization to covariance matrix
+            prior_cov += np.eye(self.num_assets) * self.regularization_factor
+            
+            # Incorporate views with regularization
+            posterior_returns, posterior_cov = self._incorporate_views(
+                prior_returns, prior_cov, returns)
+            
+            return posterior_returns, posterior_cov
+            
+        except Exception as e:
+            return self._get_default_parameters() 
+
+# Contents of .\combiner.py
+import os
+
+def combine_python_files(output_file: str):
+    """Combine all Python files in the current workspace into a single text file."""
+    with open(output_file, 'w') as outfile:
+        for dirpath, _, filenames in os.walk('.'):
+            for filename in filenames:
+                if filename.endswith('.py'):
+                    file_path = os.path.join(dirpath, filename)
+                    with open(file_path, 'r') as infile:
+                        outfile.write(f"# Contents of {file_path}\n")
+                        outfile.write(infile.read())
+                        outfile.write("\n\n")
+
+if __name__ == "__main__":
+    combine_python_files('combined_python_files.txt')
+
+
+# Contents of .\data_manager.py
+import os
+import pickle
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from typing import Tuple, List, Optional
+import logging
+import time
+
+class DataManager:
+    """Simplified Manager for financial data loading and caching"""
+
+    def __init__(self, data_dir: str = 'rl_data'):
+        self.data_dir = data_dir
+        self.logger = logging.getLogger(__name__)
+        self._setup_logging()
+        os.makedirs(data_dir, exist_ok=True)
+
+    def _setup_logging(self):
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+
+    def load_data(self,
+                 tickers: List[str],
+                 num_assets: int = 10,
+                 start_date: str = "2020-01-01",
+                 end_date: str = "2022-12-31",
+                 force_reload: bool = False) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """
+        Load or download financial data.
+
+        Parameters:
+        -----------
+        tickers : List[str]
+            List of ticker symbols to download.
+        num_assets : int
+            Number of assets to include.
+        start_date : str
+            Start date for data collection (YYYY-MM-DD).
+        end_date : str
+            End date for data collection (YYYY-MM-DD).
+        force_reload : bool
+            If True, force reload data even if it exists.
+
+        Returns:
+        --------
+        Tuple containing:
+            - X (np.ndarray): Price data of shape (num_days, num_assets).
+            - y (np.ndarray): Return data of shape (num_days, num_assets).
+            - selected_tickers (List[str]): List of asset tickers.
+        """
+        try:
+            if not force_reload:
+                # Try loading from cache first
+                cached_data = self._load_from_cache(tickers, num_assets, start_date, end_date)
+                if cached_data is not None:
+                    return cached_data
+
+            # If not in cache or force_reload, download new data
+            self.logger.info("Downloading new data from yfinance...")
+            return self._download_and_cache_data(tickers, num_assets, start_date, end_date)
+
+        except Exception as e:
+            self.logger.error(f"Error loading data: {str(e)}")
+            raise
+
+    def _load_from_cache(self, tickers: List[str], num_assets: int, start_date: str, end_date: str) -> Optional[Tuple[np.ndarray, np.ndarray, List[str]]]:
+        """Try loading data from cache."""
+        # Define filenames with sorted tickers to ensure consistency
+        sorted_tickers = sorted(tickers)
+        tickers_key = '_'.join(sorted_tickers[:num_assets])
+        x_file = f"x_train_{num_assets}_{start_date}_{end_date}.pkl"
+        y_file = f"y_train_{num_assets}_{start_date}_{end_date}.pkl"
+        tickers_file = f"tickers_{num_assets}_{start_date}_{end_date}.pkl"
+
+        x_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), x_file)
+        y_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), y_file)
+        tickers_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), tickers_file)
+
+        print("trying to load")
+
+        try:
+            with open(x_path, 'rb') as f:
+                X = pickle.load(f)
+            with open(y_path, 'rb') as f:
+                y = pickle.load(f)
+            with open(tickers_path, 'rb') as f:
+                loaded_tickers = pickle.load(f)
+            return X, y, loaded_tickers
+        except Exception as e:
+            print(e)
+            return None
+
+    def _download_and_cache_data(self, tickers: List[str], num_assets: int, start_date: str, end_date: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Download data from yfinance and cache it."""
+        selected_tickers = []
+        all_prices = []
+        all_returns = []
+
+        for ticker in tickers:
+            if len(selected_tickers) >= num_assets:
+                break  # Stop if desired number of assets is reached
+            try:
+                self.logger.info(f"Downloading {ticker}...")
+                # Download data with threads=False to prevent connection pool issues
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False, threads=False)
+                
+                if data.empty:
+                    self.logger.warning(f"Skipping {ticker}: No data downloaded.")
+                    continue
+
+                adj_close = data['Adj Close'].dropna()
+                if len(adj_close) < 30:
+                    self.logger.warning(f"Skipping {ticker}: Insufficient data points ({len(adj_close)}).")
+                    continue
+
+                # Calculate returns
+                returns = adj_close.pct_change().dropna().values
+                prices = adj_close.values[1:]  # Align with returns
+
+                if len(returns) == 0 or len(prices) == 0:
+                    self.logger.warning(f"Skipping {ticker}: No returns calculated.")
+                    continue
+
+                selected_tickers.append(ticker)
+                all_prices.append(prices)
+                all_returns.append(returns)
+                self.logger.info(f"Added {ticker}: {len(prices)} data points.")
+
+                # Optional: Add a small delay to prevent overwhelming the server
+                time.sleep(0.5)
+
+            except Exception as e:
+                self.logger.warning(f"Failed to download {ticker}: {str(e)}")
+
+        if len(selected_tickers) < num_assets:
+            self.logger.warning(f"Only found {len(selected_tickers)} assets with sufficient data, requested {num_assets}.")
+
+        if not selected_tickers:
+            raise ValueError("No valid tickers downloaded.")
+
+        # Find the minimum length to align all assets
+        min_length = min(len(prices) for prices in all_prices)
+
+        # Trim all arrays to the minimum length
+        X = np.column_stack([prices[-min_length:, :num_assets] for prices in all_prices])  # Shape: (num_days, num_assets)
+        y = np.column_stack([returns[-min_length:, :num_assets] for returns in all_returns])  # Shape: (num_days, num_assets)
+
+        # Save to cache
+        self._save_to_cache(X, y, selected_tickers[:num_assets], num_assets, start_date, end_date)
+
+        return X, y, selected_tickers
+
+    def _save_to_cache(self, X: np.ndarray, y: np.ndarray, tickers: List[str], 
+                      num_assets: int, start_date: str, end_date: str):
+        """Save data to cache."""
+        sorted_tickers = sorted(tickers)
+        tickers_key = '_'.join(sorted_tickers[:num_assets])
+        x_file = f"x_train_{len(tickers)}_{start_date}_{end_date}.pkl"
+        y_file = f"y_train_{len(tickers)}_{start_date}_{end_date}.pkl"
+        tickers_file = f"tickers_{len(tickers)}_{start_date}_{end_date}.pkl"
+
+        x_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), x_file)
+        y_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), y_file)
+        tickers_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), tickers_file)
+
+        with open(x_path, 'wb') as f:
+            pickle.dump(X, f)
+        with open(y_path, 'wb') as f:
+            pickle.dump(y, f)
+        with open(tickers_path, 'wb') as f:
+            pickle.dump(tickers, f)
+
+        self.logger.info(f"Saved data to cache: X shape {X.shape}, y shape {y.shape}, tickers {tickers}")
+
+def main():
+    """Example usage with sample data loading"""
+    # Configure root logger
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    data_manager = DataManager()
+
+    # Define periods
+    periods = [
+        ("2020-01-01", "2022-12-31"),
+        ("2022-01-01", "2023-12-31")
+    ]
+
+    # Define a list of tickers (for simplicity, using a smaller list)
+    # You can adjust this list or read from 'sp500tickers.txt'
+    tickers = [
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'JPM', 'V', 'PG', 'MA',
+        'HD', 'BAC', 'CVX', 'KO', 'PFE', 'DIS', 'WMT', 'MRK', 'XOM', 'ORCL'
+    ]
+
+    for start_date, end_date in periods:
+        try:
+            num_assets = 10  # Change as needed
+            print(f"\nLoading data for period {start_date} to {end_date} with {num_assets} assets")
+            X, y, selected_tickers = data_manager.load_data(
+                tickers=tickers,
+                num_assets=num_assets,
+                start_date=start_date,
+                end_date=end_date,
+                force_reload=False
+            )
+
+            print(f"Data shapes:")
+            print(f"X: {X.shape}")  # Expected: (num_days, num_assets)
+            print(f"y: {y.shape}")  # Expected: (num_days, num_assets)
+            print(f"Number of assets: {len(selected_tickers)}")
+            print(f"Sample tickers: {selected_tickers[:5]}")
+
+        except Exception as e:
+            print(f"Failed to load data for period {start_date} to {end_date}: {e}")
+
+if __name__ == "__main__":
+    main()
+
+
+# Contents of .\env_validator.py
+import logging
+import numpy as np
+from financial_env import FinancialEnv, EnvironmentConfig, ObservationType, RewardType
+from data_manager import DataManager
+from typing import Dict, List, Tuple
+import pandas as pd
+
+class EnvironmentValidator:
+    """Validator for FinancialEnv with various edge cases"""
+    
+    def __init__(self, logger=None, debug=True):
+        self.logger = logger or logging.getLogger(__name__)
+        self.debug = debug
+        self._setup_logging()
+        
+        # Initialize data manager
+        self.data_manager = DataManager()
+        
+        # Default configuration
+        self.train_period = ("2020-01-01", "2022-12-31")
+        self.val_period = ("2022-01-01", "2023-12-31")
+        self.num_assets = 5
+        self.tickers = [
+            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'JPM', 'V', 'PG', 'MA'
+        ]
+        
+        # Load data for both periods
+        self._load_data()
+        
+    def _load_data(self):
+        """Load data for both training and validation periods"""
+        print("\nLoading training data...")
+        train_data = self.data_manager.load_data(
+            tickers=self.tickers,
+            num_assets=self.num_assets,
+            start_date=self.train_period[0],
+            end_date=self.train_period[1]
+        )
+        self.train_prices, self.train_returns, self.selected_tickers = train_data
+        
+        print("\nLoading validation data...")
+        val_data = self.data_manager.load_data(
+            tickers=self.selected_tickers,  # Use same tickers as training
+            num_assets=self.num_assets,
+            start_date=self.val_period[0],
+            end_date=self.val_period[1]
+        )
+        self.val_prices, self.val_returns, _ = val_data
+        
+    def _setup_logging(self):
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO if not self.debug else logging.DEBUG)
+    
+    def _test_strategy_performance(self, strategy_name: str, weight_func, prices: np.ndarray, returns: np.ndarray, period: str) -> Dict[str, float]:
+        """Test performance of a given portfolio weighting strategy"""
+        config = EnvironmentConfig(
+            window_size=20,
+            prediction_days=5,
+            num_assets=self.num_assets,
+            observation_types=[ObservationType.RETURNS],
+            reward_types=[RewardType.SHARPE],
+            max_steps=30  # Limit episode length
+        )
+        
+        env = FinancialEnv(config, prices, returns)
+        
+        episode_metrics = []
+        num_episodes = 10
+        
+        print(f"\nTesting {strategy_name} Strategy ({period}):")
+        
+        for episode in range(num_episodes):
+            obs, _ = env.reset()
+            done = False
+            episode_returns = []
+            
+            print(f"\nEpisode {episode + 1}:")
+            print(f"Start index: {env.episode_start_idx}")
+            
+            while not done:
+                weights = weight_func(env)
+                obs, reward, done, _, info = env.step(weights)
+                episode_returns.extend(info.get('k_day_returns', []))
+            
+            print(f"End index: {env.episode_end_idx}")
+            print(f"Episode length: {len(episode_returns)} days")
+            print(f"Cumulative return: {info['episode_cumulative_return']:.4f}")
+            print(f"Sharpe ratio: {info['episode_sharpe']:.4f}")
+            
+            episode_metrics.append(info)
+        
+        # Calculate aggregate statistics
+        cumulative_returns = [m['episode_cumulative_return'] for m in episode_metrics]
+        sharpe_ratios = [m['episode_sharpe'] for m in episode_metrics]
+        
+        return {
+            'mean_cumulative_return': np.mean(cumulative_returns),
+            'std_cumulative_return': np.std(cumulative_returns),
+            'mean_sharpe': np.mean(sharpe_ratios),
+            'std_sharpe': np.std(sharpe_ratios),
+            'num_episodes': num_episodes,
+            "total_return": np.mean(cumulative_returns),
+            "mean_return": np.mean(cumulative_returns),
+            "std_return": np.std(cumulative_returns),
+            "sharpe_ratio": np.mean(sharpe_ratios),
+            "max_drawdown": np.min(cumulative_returns),
+            "num_steps": num_episodes,
+            "num_returns": num_episodes,
+            "quarter_returns": [np.mean(cumulative_returns[i:i+3]) for i in range(0, len(cumulative_returns), 3)]
+        }
+    
+    def compare_strategies(self):
+        """Compare equal weight vs random weight strategies on both periods"""
+        # Print data summary for both periods
+        print("\nData Summary:")
+        print("\nTraining Period:")
+        print(f"Period: {self.train_period[0]} to {self.train_period[1]}")
+        print(f"Number of days: {len(self.train_returns)}")
+        print(f"Number of assets: {self.num_assets}")
+        print(f"Selected tickers: {self.selected_tickers}")
+        print("Return statistics:")
+        print(f"Mean returns per asset: {np.mean(self.train_returns, axis=0)}")
+        print(f"Std returns per asset: {np.std(self.train_returns, axis=0)}")
+        print(f"Price ranges per asset: {np.min(self.train_prices, axis=0)} - {np.max(self.train_prices, axis=0)}")
+        
+        print("\nValidation Period:")
+        print(f"Period: {self.val_period[0]} to {self.val_period[1]}")
+        print(f"Number of days: {len(self.val_returns)}")
+        print("Return statistics:")
+        print(f"Mean returns per asset: {np.mean(self.val_returns, axis=0)}")
+        print(f"Std returns per asset: {np.std(self.val_returns, axis=0)}")
+        print(f"Price ranges per asset: {np.min(self.val_prices, axis=0)} - {np.max(self.val_prices, axis=0)}")
+        
+        print("\nRunning Strategy Comparison Test...")
+        
+        # Test strategies on training period
+        train_equal_weight = self._test_strategy_performance(
+            "Equal Weight",
+            lambda env: np.ones(env.config.num_assets) / env.config.num_assets,
+            self.train_prices,
+            self.train_returns,
+            "Training"
+        )
+        
+        train_random_weight = self._test_strategy_performance(
+            "Random Weight",
+            lambda env: np.random.dirichlet(np.ones(env.config.num_assets)),
+            self.train_prices,
+            self.train_returns,
+            "Training"
+        )
+        
+        # Test strategies on validation period
+        val_equal_weight = self._test_strategy_performance(
+            "Equal Weight",
+            lambda env: np.ones(env.config.num_assets) / env.config.num_assets,
+            self.val_prices,
+            self.val_returns,
+            "Validation"
+        )
+        
+        val_random_weight = self._test_strategy_performance(
+            "Random Weight",
+            lambda env: np.random.dirichlet(np.ones(env.config.num_assets)),
+            self.val_prices,
+            self.val_returns,
+            "Validation"
+        )
+        
+        # Print comparison results
+        print("\nStrategy Comparison Results:")
+        print("-" * 50)
+        
+        def print_strategy_results(results, strategy_name, period):
+            print(f"\n{strategy_name} Strategy ({period}):")
+            print(f"Total Return: {results['total_return']:.2f}%")
+            print(f"Mean Daily Return: {results['mean_return']:.4f}%")
+            print(f"Daily Return Std: {results['std_return']:.4f}%")
+            print(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
+            print(f"Maximum Drawdown: {results['max_drawdown']:.2f}%")
+            print(f"Number of Steps: {results['num_steps']}")
+            print(f"Number of Returns: {results['num_returns']}")
+            if results['quarter_returns']:
+                print("\nQuarterly Performance:")
+                for i, qret in enumerate(results['quarter_returns'], 1):
+                    print(f"Q{i}: {qret:.2f}%")
+        
+        print("\nTraining Period Results:")
+        print("-" * 30)
+        print_strategy_results(train_equal_weight, "Equal Weight", "Training")
+        print("\nVS\n")
+        print_strategy_results(train_random_weight, "Random Weight", "Training")
+        
+        print("\nValidation Period Results:")
+        print("-" * 30)
+        print_strategy_results(val_equal_weight, "Equal Weight", "Validation")
+        print("\nVS\n")
+        print_strategy_results(val_random_weight, "Random Weight", "Validation")
+        
+        # Print strategy comparison summary
+        print("\nStrategy Comparison Summary:")
+        print("-" * 30)
+        print("\nTraining Period:")
+        print(f"Equal Weight vs Random Weight:")
+        print(f"Total Return Difference: {train_equal_weight['total_return'] - train_random_weight['total_return']:.2f}%")
+        print(f"Sharpe Ratio Difference: {train_equal_weight['sharpe_ratio'] - train_random_weight['sharpe_ratio']:.2f}")
+        
+        print("\nValidation Period:")
+        print(f"Equal Weight vs Random Weight:")
+        print(f"Total Return Difference: {val_equal_weight['total_return'] - val_random_weight['total_return']:.2f}%")
+        print(f"Sharpe Ratio Difference: {val_equal_weight['sharpe_ratio'] - val_random_weight['sharpe_ratio']:.2f}")
+        
+        print("\nValidation Complete!")
+
+def main():
+    validator = EnvironmentValidator(debug=True)
+    validator.compare_strategies()
+
+if __name__ == "__main__":
+    main()
+
+# Contents of .\financial_env.py
+import gymnasium as gym
+import numpy as np
+from typing import Dict, List, Tuple, Optional, Any, Callable
+from dataclasses import dataclass
+from enum import Enum
+from black_litterman import BlackLittermanModel
+from financial_params import FinancialMetrics, FinancialParameters
+
+class ObservationType(Enum):
+    """Types of observations that can be included in the state"""
+    PRICES = "prices"
+    RETURNS = "returns"
+    TECHNICAL = "technical"
+    TREND = "trend"
+    BLACK_LITTERMAN = "black_litterman"
+    DIVERSIFICATION = "diversification"
+
+class RewardType(Enum):
+    """Types of reward components"""
+    SHARPE = "sharpe"
+    SORTINO = "sortino"
+    DIVERSIFICATION = "diversification"
+    TURNOVER = "turnover"
+    TRACKING_ERROR = "tracking_error"
+    BLACK_LITTERMAN = "black_litterman"
+
+@dataclass
+class EnvironmentConfig:
+    """Configuration for the financial environment"""
+    window_size: int = 20
+    prediction_days: int = 5
+    num_assets: int = 10
+    observation_types: List[ObservationType] = None
+    reward_types: List[RewardType] = None
+    transaction_cost: float = 0.001
+    risk_free_rate: float = 0.02
+    target_volatility: float = 0.15
+    regularization_factor: float = 1e-6
+    max_steps: Optional[int] = None
+    
+    def __post_init__(self):
+        if self.observation_types is None:
+            self.observation_types = list(ObservationType)
+        if self.reward_types is None:
+            self.reward_types = list(RewardType)
+
+class ObservationFactory:
+    """Factory for creating observation components"""
+    
+    @staticmethod
+    def create_observation_space(config: EnvironmentConfig) -> Dict[str, gym.Space]:
+        """Create observation spaces for each component"""
+        spaces = {}
+        
+        for obs_type in config.observation_types:
+            if obs_type == ObservationType.PRICES:
+                spaces[obs_type.value] = gym.spaces.Box(
+                    low=-np.inf, high=np.inf, 
+                    shape=(config.window_size, config.num_assets)
+                )
+            elif obs_type == ObservationType.RETURNS:
+                spaces[obs_type.value] = gym.spaces.Box(
+                    low=-1, high=1, 
+                    shape=(config.window_size, config.num_assets)
+                )
+            elif obs_type == ObservationType.TECHNICAL:
+                # RSI, BB, Volatility
+                spaces[obs_type.value] = gym.spaces.Box(
+                    low=0, high=1, 
+                    shape=(3, config.num_assets)
+                )
+            elif obs_type == ObservationType.TREND:
+                # MA ratios, Momentum, Trend strength
+                spaces[obs_type.value] = gym.spaces.Box(
+                    low=-np.inf, high=np.inf, 
+                    shape=(3, config.num_assets)
+                )
+            elif obs_type == ObservationType.BLACK_LITTERMAN:
+                # Expected returns, Covariance
+                spaces[obs_type.value] = gym.spaces.Box(
+                    low=-np.inf, high=np.inf, 
+                    shape=(2, config.num_assets)
+                )
+            elif obs_type == ObservationType.DIVERSIFICATION:
+                # Correlation, Volatility contribution
+                spaces[obs_type.value] = gym.spaces.Box(
+                    low=-1, high=1, 
+                    shape=(2, config.num_assets)
+                )
+                
+        return spaces
+
+class RewardFactory:
+    """Factory for creating reward components"""
+    
+    @staticmethod
+    def create_reward_functions(config: EnvironmentConfig) -> Dict[str, Callable]:
+        """Create reward functions with better scaling"""
+        functions = {}
+        
+        for reward_type in config.reward_types:
+            if reward_type == RewardType.SHARPE:
+                functions[reward_type.value] = lambda returns, vol: np.clip(
+                    (np.mean(returns) - config.risk_free_rate) / (vol + 1e-6),
+                    -1, 1
+                )
+            elif reward_type == RewardType.SORTINO:
+                functions[reward_type.value] = lambda returns: np.clip(
+                    RewardFactory._calculate_sortino_ratio(
+                        returns, config.risk_free_rate
+                    ),
+                    -1, 1
+                )
+            elif reward_type == RewardType.DIVERSIFICATION:
+                functions[reward_type.value] = lambda weights: np.clip(
+                    -np.sum(weights ** 2) + 1,  # Shifted to [-1, 1] range
+                    -1, 1
+                )
+            elif reward_type == RewardType.TURNOVER:
+                functions[reward_type.value] = lambda weights: np.clip(
+                    -np.sum(np.abs(weights - np.ones(config.num_assets)/config.num_assets)) * config.transaction_cost,
+                    -1, 1
+                )
+            elif reward_type == RewardType.TRACKING_ERROR:
+                functions[reward_type.value] = lambda weights: np.clip(
+                    -np.sum((weights - 1/config.num_assets) ** 2),
+                    -1, 1
+                )
+            elif reward_type == RewardType.BLACK_LITTERMAN:
+                functions[reward_type.value] = lambda weights, bl_returns: np.clip(
+                    np.dot(weights, bl_returns),
+                    -1, 1
+                )
+                
+        return functions
+    
+    @staticmethod
+    def _calculate_sortino_ratio(returns: np.ndarray, risk_free_rate: float) -> float:
+        """Calculate Sortino ratio"""
+        excess_returns = returns - risk_free_rate
+        downside_returns = np.where(returns < 0, returns, 0)
+        downside_std = np.std(downside_returns) + 1e-6
+        return np.mean(excess_returns) / downside_std
+
+class FinancialEnv(gym.Env):
+    """
+    A modular financial environment for portfolio optimization
+    
+    The environment uses a factory pattern to create observation and reward components
+    based on the provided configuration. It supports multiple observation types and
+    reward components that can be combined flexibly.
+    """
+    
+    def __init__(self, config: EnvironmentConfig, full_prices: np.ndarray, full_returns: np.ndarray):
+        """Initialize environment with full data"""
+        self.config = config
+        self.full_prices = full_prices
+        self.full_returns = full_returns
+        
+        # Set max_steps based on data length if not specified
+        if self.config.max_steps is None:
+            self.config.max_steps = (len(full_returns) - self.config.window_size) // self.config.prediction_days
+        
+        # Create action and observation spaces
+        self.action_space = gym.spaces.Box(
+            low=0, high=1, 
+            shape=(config.num_assets,), 
+            dtype=np.float32
+        )
+        
+        self.observation_space = gym.spaces.Dict(
+            ObservationFactory.create_observation_space(config)
+        )
+        
+        # Initialize components
+        self.bl_model = BlackLittermanModel(
+            num_assets=config.num_assets,
+            window_size=config.window_size
+        )
+        self.financial_metrics = FinancialMetrics()
+        self.reward_functions = RewardFactory.create_reward_functions(config)
+        
+        # Initialize state variables
+        self.current_step = 0
+        self.current_idx = 0
+        self.returns_history = None
+        self.prices_history = None
+        self.previous_weights = None
+        
+        # Add episode tracking
+        self.episode_returns = []
+        self.episode_start_idx = None
+        self.episode_end_idx = None
+
+    def reset(self, seed=None, options=None):
+        """Reset environment to start new episode"""
+        super().reset(seed=seed)
+        
+        # Reset episode tracking
+        self.episode_returns = []
+        
+        # Randomly select starting point that allows for a full episode
+        max_start = len(self.full_returns) - (self.config.window_size + self.config.max_steps * self.config.prediction_days)
+        self.current_idx = self.np_random.integers(self.config.window_size, max_start) if max_start > self.config.window_size else self.config.window_size
+        
+        self.episode_start_idx = self.current_idx
+        self.current_step = 0
+        
+        # Initialize histories with actual data
+        self.returns_history = self.full_returns[
+            self.current_idx - self.config.window_size:self.current_idx
+        ]
+        self.prices_history = self.full_prices[
+            self.current_idx - self.config.window_size:self.current_idx
+        ]
+        
+        self.previous_weights = np.ones(self.config.num_assets) / self.config.num_assets
+        
+        return self._get_observation(), {}
+    
+    def step(self, action: np.ndarray):
+        """Execute one step, applying weights for prediction_days"""
+        try:
+            weights = self._normalize_weights(action)
+            
+            # Calculate returns for the prediction period
+            k_day_returns = []
+            k_day_prices = []
+            
+            for k in range(self.config.prediction_days):
+                day_idx = self.current_idx + k
+                if day_idx >= len(self.full_returns):
+                    break
+                    
+                daily_return = np.dot(weights, self.full_returns[day_idx])
+                k_day_returns.append(daily_return)
+                k_day_prices.append(self.full_prices[day_idx])
+                
+            # Store returns for episode tracking
+            self.episode_returns.extend(k_day_returns)
+            
+            # Update current index and step counter
+            self.current_idx += self.config.prediction_days
+            self.current_step += 1
+            
+            # Update histories
+            if self.current_idx < len(self.full_returns):
+                self.returns_history = self.full_returns[
+                    self.current_idx - self.config.window_size:self.current_idx
+                ]
+                self.prices_history = self.full_prices[
+                    self.current_idx - self.config.window_size:self.current_idx
+                ]
+            
+            # Calculate reward
+            reward = self._calculate_reward(weights)
+            
+            # Check if episode is done
+            done = (self.current_idx >= len(self.full_returns) - self.config.prediction_days or 
+                   self.current_step >= self.config.max_steps)
+            
+            if done:
+                self.episode_end_idx = self.current_idx
+            
+            # Calculate episode metrics
+            episode_metrics = self._get_episode_metrics() if done else {}
+            
+            info = {
+                'portfolio_return': float(np.mean(k_day_returns)) if k_day_returns else 0.0,
+                'weights': weights.tolist(),
+                'reward_components': self._get_reward_components(weights),
+                'k_day_returns': k_day_returns,
+                'current_idx': self.current_idx,
+                'episode_start': self.episode_start_idx,
+                'episode_end': self.episode_end_idx if done else None,
+                'current_step': self.current_step,
+                **episode_metrics
+            }
+            
+            self.previous_weights = weights.copy()
+            
+            return self._get_observation(), reward, done, False, info
+            
+        except Exception as e:
+            print(f"Error in step: {e}")
+            return self._get_observation(), -1.0, True, False, {}
+            
+    def _get_episode_metrics(self) -> dict:
+        """Calculate episode-level metrics"""
+        if not self.episode_returns:
+            return {}
+            
+        episode_returns = np.array(self.episode_returns)
+        cumulative_return = np.prod(1 + episode_returns) - 1
+        mean_return = np.mean(episode_returns)
+        std_return = np.std(episode_returns)
+        sharpe = mean_return / (std_return + 1e-6)
+        
+        return {
+            'episode_cumulative_return': float(cumulative_return),
+            'episode_mean_return': float(mean_return),
+            'episode_sharpe': float(sharpe),
+            'episode_length': len(episode_returns),
+            'episode_volatility': float(std_return)
+        }
+    
+    def _normalize_weights(self, weights: np.ndarray) -> np.ndarray:
+        """Normalize weights to sum to 1 with bounds"""
+        weights = np.clip(weights, 0, 1)
+        weight_sum = np.sum(weights)
+        if weight_sum > 0:
+            return weights / weight_sum
+        return np.ones(self.config.num_assets) / self.config.num_assets
+    
+    def _calculate_portfolio_return(self, weights: np.ndarray) -> float:
+        """Calculate portfolio return"""
+        return np.dot(weights, self.returns_history[-1])
+    
+    def _update_histories(self, portfolio_return: float):
+        """Update histories with proper safeguards"""
+        try:
+            # Ensure arrays are properly initialized
+            if self.returns_history is None or self.prices_history is None:
+                self.reset()
+                
+            # Ensure minimum history length
+            if len(self.returns_history) < self.config.window_size:
+                pad_length = self.config.window_size - len(self.returns_history)
+                self.returns_history = np.pad(
+                    self.returns_history,
+                    ((pad_length, 0), (0, 0)),
+                    mode='constant',
+                    constant_values=0.0
+                )
+                self.prices_history = np.pad(
+                    self.prices_history,
+                    ((pad_length, 0), (0, 0)),
+                    mode='constant',
+                    constant_values=1.0
+                )
+            
+            # Update returns history
+            self.returns_history = np.roll(self.returns_history, -1, axis=0)
+            self.returns_history[-1] = np.clip(portfolio_return, -1, 1)  # Clip extreme returns
+            
+            # Update prices history
+            self.prices_history = np.roll(self.prices_history, -1, axis=0)
+            self.prices_history[-1] = self.prices_history[-2] * (1 + self.returns_history[-1])
+            
+        except Exception as e:
+            print(f"Warning: Error updating histories: {e}")
+            self.reset()  # Reset if something goes wrong
+    
+    def _get_observation(self) -> Dict[str, np.ndarray]:
+        """Get current observation based on configured observation types"""
+        observation = {}
+        
+        for obs_type in self.config.observation_types:
+            if obs_type == ObservationType.PRICES:
+                observation[obs_type.value] = self._normalize_prices(self.prices_history)
+            elif obs_type == ObservationType.RETURNS:
+                observation[obs_type.value] = self.returns_history
+            elif obs_type == ObservationType.TECHNICAL:
+                observation[obs_type.value] = self._get_technical_indicators()
+            elif obs_type == ObservationType.TREND:
+                observation[obs_type.value] = self._get_trend_indicators()
+            elif obs_type == ObservationType.BLACK_LITTERMAN:
+                observation[obs_type.value] = self._get_black_litterman_params()
+            elif obs_type == ObservationType.DIVERSIFICATION:
+                observation[obs_type.value] = self._get_diversification_metrics()
+        
+        return observation
+    
+    def _calculate_reward(self, weights: np.ndarray) -> float:
+        """Calculate combined reward with clipping"""
+        components = self._get_reward_components(weights)
+        # Clip individual components
+        clipped_components = {
+            k: np.clip(v, -1, 1) for k, v in components.items()
+        }
+        # Average clipped components
+        return np.mean(list(clipped_components.values()))
+    
+    def _get_reward_components(self, weights: np.ndarray) -> Dict[str, float]:
+        """Calculate reward components with proper handling"""
+        components = {}
+        
+        for reward_type, func in self.reward_functions.items():
+            try:
+                if reward_type == RewardType.SHARPE.value:
+                    if len(self.returns_history) < self.config.window_size:
+                        components[reward_type] = 0.0
+                        continue
+                        
+                    returns = self.returns_history[-self.config.window_size:]
+                    vol = np.std(returns) + 1e-6
+                    components[reward_type] = func(returns, vol)
+                    
+                elif reward_type == RewardType.BLACK_LITTERMAN.value:
+                    if len(self.returns_history) < self.config.window_size:
+                        components[reward_type] = 0.0
+                        continue
+                        
+                    returns, _ = self.bl_model.optimize(
+                        self.returns_history[-self.config.window_size:]
+                    )
+                    components[reward_type] = func(weights, returns)
+                    
+                else:
+                    components[reward_type] = func(weights)
+                
+                # Clip extreme values
+                components[reward_type] = np.clip(components[reward_type], -1, 1)
+                
+            except Exception as e:
+                components[reward_type] = 0.0
+        
+        return components
+    
+    # Helper methods for observation components...
+    def _normalize_prices(self, prices: np.ndarray) -> np.ndarray:
+        """Normalize prices to recent window"""
+        return prices / np.mean(prices)
+    
+    def _get_technical_indicators(self) -> np.ndarray:
+        """Get technical indicators with safeguards"""
+        try:
+            indicators = self.financial_metrics.calculate_technical_indicators(
+                self.prices_history[-self.config.window_size:]
+            )
+        except Exception as e:
+            print(f"Warning: Error calculating technical indicators: {e}")
+            indicators = {
+                'rsi': np.zeros(self.config.num_assets),
+                'bb_position': np.zeros(self.config.num_assets),
+                'volatility': np.zeros(self.config.num_assets)
+            }
+        
+        # Safe normalization
+        return np.vstack([
+            indicators['rsi'] / 100,  # Normalize to [0, 1]
+            (indicators['bb_position'] + 1) / 2,  # Normalize to [0, 1]
+            indicators['volatility'][0] / np.max(indicators['volatility'])  # Normalize
+        ])
+
+    def _get_trend_indicators(self) -> np.ndarray:
+        """Get trend indicators with proper window handling"""
+        try:
+            # Ensure we have enough history
+            if len(self.prices_history) < self.config.window_size:
+                return np.zeros((3, self.config.num_assets))
+            
+            # Use only complete windows
+            window_prices = self.prices_history[-self.config.window_size:]
+            
+            trend_metrics = self.financial_metrics.calculate_trend_metrics(window_prices)
+            
+            # Safe normalization with clipping
+            ma_ratios = np.clip(trend_metrics['ma_ratios'][0], -5, 5)
+            momentum = np.clip(trend_metrics['momentum'][0], -1, 1)
+            trend_strength = np.clip(trend_metrics['trend_strength'], 0, 1)
+            
+            return np.vstack([ma_ratios, momentum, trend_strength])
+            
+        except Exception as e:
+            return np.zeros((3, self.config.num_assets))
+    
+    def _get_black_litterman_params(self) -> np.ndarray:
+        """Get Black-Litterman parameters with robust handling"""
+        try:
+            # Ensure we have enough history
+            if len(self.returns_history) < self.config.window_size:
+                return np.zeros((2, self.config.num_assets))
+            
+            # Add small regularization to prevent singular matrix
+            window_returns = self.returns_history[-self.config.window_size:]
+            window_returns += np.random.normal(0, 1e-8, window_returns.shape)
+            
+            returns, cov = self.bl_model.optimize(window_returns)
+            
+            # Ensure finite values and proper scaling
+            returns = np.clip(returns, -0.1, 0.1)
+            vol = np.clip(np.diag(cov), 0, 0.1)
+            
+            return np.vstack([returns, vol])
+            
+        except Exception as e:
+            return np.zeros((2, self.config.num_assets))
+    
+    def _get_diversification_metrics(self) -> np.ndarray:
+        """Get diversification metrics with safeguards"""
+        try:
+            # Use proper window size
+            window_returns = self.returns_history[-self.config.window_size:]
+            
+            # Calculate correlation matrix safely
+            corr_matrix = np.corrcoef(window_returns.T)
+            if np.isnan(corr_matrix).any():
+                corr_matrix = np.eye(self.config.num_assets)
+                
+            metrics = self.financial_metrics.calculate_diversification_metrics(
+                window_returns
+            )
+            
+            # Ensure proper shape and scaling
+            correlations = np.clip(np.diag(corr_matrix), -1, 1)
+            penalty = np.clip(
+                metrics.get('correlation_penalty', 0) * np.ones(self.config.num_assets),
+                -1, 1
+            )
+            
+            return np.vstack([correlations, penalty])
+            
+        except Exception as e:
+            print(f"Warning: Error calculating diversification metrics: {e}")
+            return np.zeros((2, self.config.num_assets)) 
+
+# Contents of .\financial_params.py
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+from scipy import stats
+import warnings
+
+@dataclass
+class FinancialParameters:
+    """Configuration parameters for financial metrics calculation"""
+    # Trend parameters
+    ma_windows: List[int] = None  # Moving average windows
+    momentum_windows: List[int] = None  # Momentum calculation windows
+    volatility_windows: List[int] = None  # Volatility calculation windows
+    
+    # Diversification parameters
+    min_weight: float = 0.0  # Minimum weight constraint
+    max_weight: float = 1.0  # Maximum weight constraint
+    risk_free_rate: float = 0.02  # Risk-free rate for Sharpe ratio
+    
+    # Technical parameters
+    rsi_window: int = 14  # RSI calculation window
+    bollinger_window: int = 20  # Bollinger Bands window
+    bollinger_std: float = 2.0  # Number of standard deviations for Bollinger Bands
+    
+    def __post_init__(self):
+        """Initialize default values if None"""
+        if self.ma_windows is None:
+            self.ma_windows = [5, 10, 20, 50]
+        if self.momentum_windows is None:
+            self.momentum_windows = [5, 10, 20]
+        if self.volatility_windows is None:
+            self.volatility_windows = [10, 20, 50]
+
+class FinancialMetrics:
+    def __init__(self, params: FinancialParameters = None):
+        """Initialize with parameters"""
+        self.params = params or FinancialParameters()
+    
+    def calculate_trend_metrics(self, prices: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Calculate trend-following metrics
+        
+        Parameters:
+        -----------
+        prices : np.ndarray
+            Price matrix (time x assets)
+            
+        Returns:
+        --------
+        Dict with keys:
+        - ma_ratios: Current price to moving average ratios
+        - momentum: Price momentum over different windows
+        - trend_strength: Trend strength indicators
+        
+        Expected ranges:
+        - ma_ratios: typically 0.8-1.2
+        - momentum: typically -0.2 to 0.2
+        - trend_strength: 0 to 1
+        """
+        results = {}
+        
+        # Calculate moving average ratios
+        ma_ratios = []
+        for window in self.params.ma_windows:
+            ma = self._calculate_ma(prices, window)
+            ratio = prices[-1] / ma[-1]
+            ma_ratios.append(ratio)
+        results['ma_ratios'] = np.array(ma_ratios)
+        
+        # Calculate momentum
+        momentum = []
+        for window in self.params.momentum_windows:
+            mom = (prices[-1] - prices[-window-1]) / prices[-window-1]
+            momentum.append(mom)
+        results['momentum'] = np.array(momentum)
+        
+        # Calculate trend strength
+        trend_strength = self._calculate_trend_strength(prices)
+        results['trend_strength'] = trend_strength
+        
+        return results
+    
+    def calculate_diversification_metrics(self, returns: np.ndarray, 
+                                       weights: Optional[np.ndarray] = None) -> Dict[str, float]:
+        """
+        Calculate diversification metrics
+        
+        Parameters:
+        -----------
+        returns : np.ndarray
+            Returns matrix (time x assets)
+        weights : np.ndarray, optional
+            Portfolio weights (default: equal weights)
+            
+        Returns:
+        --------
+        Dict with keys:
+        - herfindahl: Portfolio concentration (0-1)
+        - diversification_ratio: Portfolio diversification measure
+        - effective_n: Effective number of assets
+        - correlation_penalty: Correlation-based penalty term
+        
+        Expected ranges:
+        - herfindahl: 0 (perfect diversification) to 1 (concentration)
+        - diversification_ratio: > 1 (higher is more diversified)
+        - effective_n: 1 to number of assets
+        - correlation_penalty: 0 (uncorrelated) to 1 (perfectly correlated)
+        """
+        if weights is None:
+            weights = np.ones(returns.shape[1]) / returns.shape[1]
+            
+        results = {}
+        
+        # Herfindahl Index (concentration measure)
+        results['herfindahl'] = np.sum(weights ** 2)
+        
+        # Calculate covariance matrix
+        cov_matrix = np.cov(returns.T)
+        
+        # Portfolio volatility
+        portfolio_vol = np.sqrt(weights @ cov_matrix @ weights)
+        
+        # Individual asset volatilities
+        asset_vols = np.sqrt(np.diag(cov_matrix))
+        weighted_vols = weights * asset_vols
+        
+        # Diversification Ratio
+        results['diversification_ratio'] = np.sum(weighted_vols) / portfolio_vol
+        
+        # Effective N
+        results['effective_n'] = 1 / results['herfindahl']
+        
+        # Correlation penalty
+        corr_matrix = np.corrcoef(returns.T)
+        results['correlation_penalty'] = np.sum(weights @ corr_matrix @ weights)
+        
+        return results
+    
+    def calculate_technical_indicators(self, prices: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Calculate technical indicators
+        
+        Parameters:
+        -----------
+        prices : np.ndarray
+            Price matrix (time x assets)
+            
+        Returns:
+        --------
+        Dict with keys:
+        - rsi: Relative Strength Index
+        - bb_position: Position within Bollinger Bands
+        - volatility: Historical volatility measures
+        
+        Expected ranges:
+        - rsi: 0 to 100
+        - bb_position: -1 to 1 (position within bands)
+        - volatility: typically 0.01 to 0.5 (annualized)
+        """
+        results = {}
+        
+        # Calculate RSI
+        results['rsi'] = self._calculate_rsi(prices)
+        
+        # Calculate Bollinger Bands position
+        results['bb_position'] = self._calculate_bb_position(prices)
+        
+        # Calculate volatility measures
+        vol_measures = []
+        for window in self.params.volatility_windows:
+            returns = np.log(prices[1:] / prices[:-1])
+            vol = np.std(returns[-window:], axis=0) * np.sqrt(252)  # Annualized
+            vol_measures.append(vol)
+        results['volatility'] = np.array(vol_measures)
+        
+        return results
+    
+    def _calculate_ma(self, prices: np.ndarray, window: int) -> np.ndarray:
+        """Calculate moving average"""
+        return np.array([np.mean(prices[max(0, i-window+1):i+1], axis=0) 
+                        for i in range(len(prices))])
+    
+    def _calculate_trend_strength(self, prices: np.ndarray) -> np.ndarray:
+        """Calculate trend strength using linear regression R²"""
+        x = np.arange(len(prices)).reshape(-1, 1)
+        trend_strength = np.array([
+            stats.linregress(x.flatten(), prices[:, i]).rvalue ** 2
+            for i in range(prices.shape[1])
+        ])
+        return trend_strength
+    
+    def _calculate_rsi(self, prices: np.ndarray) -> np.ndarray:
+        """Calculate RSI"""
+        returns = np.diff(prices, axis=0)
+        gains = np.maximum(returns, 0)
+        losses = -np.minimum(returns, 0)
+        
+        avg_gains = np.mean(gains[-self.params.rsi_window:], axis=0)
+        avg_losses = np.mean(losses[-self.params.rsi_window:], axis=0)
+        
+        rs = avg_gains / (avg_losses + 1e-6)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    def _calculate_bb_position(self, prices: np.ndarray) -> np.ndarray:
+        """Calculate position within Bollinger Bands"""
+        ma = self._calculate_ma(prices, self.params.bollinger_window)
+        std = np.std(prices[-self.params.bollinger_window:], axis=0)
+        
+        upper = ma[-1] + self.params.bollinger_std * std
+        lower = ma[-1] - self.params.bollinger_std * std
+        
+        position = (prices[-1] - ma[-1]) / (upper - lower + 1e-6)
+        return np.clip(position, -1, 1) 
+
+# Contents of .\param_tester.py
+import numpy as np
+import pandas as pd
+from typing import Dict, Any, Tuple, List
+from dataclasses import dataclass
+import logging
+from financial_params import FinancialParameters, FinancialMetrics
+
+@dataclass
+class BLParameters:
+    """Parameters for Black-Litterman model"""
+    window_size: int = 20
+    risk_free_rate: float = 0.02
+    market_return: float = 0.08
+    risk_aversion: float = 2.0
+    tau: float = 0.05
+    confidence_level: float = 0.95
+    min_history_length: int = 5
+    max_history_length: int = 252
+    vol_lookback: int = 20
+    view_lookback: int = 5
+    regularization_factor: float = 1e-6
+    use_exponential_weights: bool = True
+    decay_factor: float = 0.94
+    rebalance_frequency: int = 5
+
+class ParamTester:
+    def __init__(self, logger=None):
+        """Initialize parameter tester with optional logger"""
+        self.logger = logger or logging.getLogger(__name__)
+        self.error_counts: Dict[str, int] = {}
+        self.test_results: List[Dict[str, Any]] = []
+        self.financial_metrics = FinancialMetrics()
+        
+    def _setup_logging(self):
+        """Setup logging if not already configured"""
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+
+    def _validate_data(self, returns_data: np.ndarray) -> Tuple[bool, str]:
+        """Validate input data format and dimensions"""
+        try:
+            if not isinstance(returns_data, np.ndarray):
+                return False, "Input must be numpy array"
+            
+            if returns_data.ndim != 2:
+                return False, f"Expected 2D array, got {returns_data.ndim}D"
+            
+            if np.isnan(returns_data).any():
+                return False, "Data contains NaN values"
+            
+            if np.isinf(returns_data).any():
+                return False, "Data contains infinite values"
+            
+            return True, "Data validation passed"
+            
+        except Exception as e:
+            return False, f"Data validation error: {str(e)}"
+
+    def _test_black_litterman(self, 
+                            returns_data: np.ndarray, 
+                            params: BLParameters,
+                            test_name: str) -> Dict[str, Any]:
+        """Test Black-Litterman model with given parameters"""
+        from black_litterman import BlackLittermanModel
+        
+        result = {
+            "test_name": test_name,
+            "success": False,
+            "errors": [],
+            "warnings": [],
+            "metrics": {}
+        }
+        
+        try:
+            # Validate data
+            is_valid, message = self._validate_data(returns_data)
+            if not is_valid:
+                result["errors"].append(message)
+                return result
+            
+            # Initialize model
+            num_assets = returns_data.shape[1]
+            bl_model = BlackLittermanModel(
+                num_assets=num_assets,
+                window_size=params.window_size,
+                risk_free_rate=params.risk_free_rate,
+                market_return=params.market_return,
+                risk_aversion=params.risk_aversion,
+                tau=params.tau,
+                decay_factor=params.decay_factor,
+                regularization_factor=params.regularization_factor,
+                use_exponential_weights=params.use_exponential_weights
+            )
+            
+            # Test prior calculation
+            prior_returns, prior_cov = bl_model._calculate_prior(returns_data)
+            if prior_returns is None or prior_cov is None:
+                result["errors"].append("Prior calculation failed")
+                return result
+                
+            # Test view incorporation
+            posterior_returns, posterior_cov = bl_model._incorporate_views(
+                prior_returns, prior_cov, returns_data
+            )
+            if posterior_returns is None or posterior_cov is None:
+                result["errors"].append("View incorporation failed")
+                return result
+            
+            # Test full optimization
+            final_returns, final_cov = bl_model.optimize(returns_data)
+            if final_returns is None or final_cov is None:
+                result["errors"].append("Optimization failed")
+                return result
+            
+            # Calculate test metrics
+            result["metrics"] = {
+                "mean_expected_return": float(np.mean(final_returns)),
+                "portfolio_vol": float(np.sqrt(np.diag(final_cov).mean())),
+                "condition_number": float(np.linalg.cond(final_cov))
+            }
+            
+            result["success"] = True
+            
+        except Exception as e:
+            result["errors"].append(f"Test error: {str(e)}")
+            
+        return result
+
+    def _test_financial_metrics(self, 
+                              prices: np.ndarray,
+                              returns: np.ndarray) -> Dict[str, Any]:
+        """Test financial metrics calculation"""
+        result = {
+            "success": False,
+            "errors": [],
+            "warnings": [],
+            "metrics": {}
+        }
+        
+        try:
+            # Calculate trend metrics
+            trend_metrics = self.financial_metrics.calculate_trend_metrics(prices)
+            
+            # Calculate diversification metrics
+            div_metrics = self.financial_metrics.calculate_diversification_metrics(returns)
+            
+            # Calculate technical indicators
+            tech_metrics = self.financial_metrics.calculate_technical_indicators(prices)
+            
+            # Combine all metrics
+            result["metrics"].update({
+                "trend_strength_mean": float(np.mean(trend_metrics["trend_strength"])),
+                "momentum_mean": float(np.mean(trend_metrics["momentum"])),
+                "diversification_ratio": float(div_metrics["diversification_ratio"]),
+                "effective_n": float(div_metrics["effective_n"]),
+                "avg_rsi": float(np.mean(tech_metrics["rsi"])),
+                "avg_volatility": float(np.mean(tech_metrics["volatility"]))
+            })
+            
+            result["success"] = True
+            
+        except Exception as e:
+            result["errors"].append(f"Financial metrics calculation failed: {str(e)}")
+        
+        return result
+
+    def run_tests(self, 
+                 returns_data: np.ndarray, 
+                 param_sets: List[Tuple[BLParameters, str]]) -> pd.DataFrame:
+        """
+        Run tests with multiple parameter sets
+        
+        Parameters:
+        -----------
+        returns_data : np.ndarray
+            Returns data matrix (time x assets)
+        param_sets : List[Tuple[BLParameters, str]]
+            List of (parameters, test_name) tuples to test
+            
+        Returns:
+        --------
+        pd.DataFrame
+            Test results summary
+        """
+        self._setup_logging()
+        self.test_results = []
+        
+        for params, test_name in param_sets:
+            self.logger.info(f"Running test: {test_name}")
+            result = self._test_black_litterman(returns_data, params, test_name)
+            self.test_results.append(result)
+            
+            if result["success"]:
+                self.logger.info(f"Test {test_name} succeeded")
+                self.logger.info(f"Metrics: {result['metrics']}")
+            else:
+                self.logger.error(f"Test {test_name} failed")
+                for error in result["errors"]:
+                    self.logger.error(f"Error: {error}")
+        
+        # Add financial metrics testing
+        prices = np.exp(np.cumsum(returns_data, axis=0))  # Convert returns to prices
+        financial_result = self._test_financial_metrics(prices, returns_data)
+        
+        if financial_result["success"]:
+            self.logger.info("Financial metrics calculation succeeded")
+            self.logger.info(f"Metrics: {financial_result['metrics']}")
+        else:
+            self.logger.error("Financial metrics calculation failed")
+            for error in financial_result["errors"]:
+                self.logger.error(f"Error: {error}")
+        
+        return self._create_summary()
+
+    def _create_summary(self) -> pd.DataFrame:
+        """Create summary DataFrame of test results"""
+        summary_data = []
+        
+        for result in self.test_results:
+            row = {
+                "Test Name": result["test_name"],
+                "Success": result["success"],
+                "Error Count": len(result["errors"]),
+                "Warning Count": len(result["warnings"])
+            }
+            
+            if result["success"] and "metrics" in result:
+                row.update(result["metrics"])
+                
+            summary_data.append(row)
+            
+        return pd.DataFrame(summary_data)
+
+def main():
+    """Example usage"""
+    # Create sample data
+    np.random.seed(42)
+    returns_data = np.random.randn(100, 10) * 0.01  # 100 days, 10 assets
+    
+    # Create parameter sets
+    param_sets = [
+        (BLParameters(window_size=20, decay_factor=0.94), "Default Parameters"),
+        (BLParameters(window_size=60, decay_factor=0.98), "Long Window"),
+        (BLParameters(window_size=10, decay_factor=0.90), "Short Window")
+    ]
+    
+    # Run tests
+    tester = ParamTester()
+    results = tester.run_tests(returns_data, param_sets)
+    
+    print("\nTest Results Summary:")
+    print(results)
+
+if __name__ == "__main__":
+    main() 
+
+# Contents of .\portfolio_trainer.py
+import numpy as np
+from typing import Dict, Optional, List
+import os
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from financial_env import FinancialEnv, EnvironmentConfig, ObservationType, RewardType
+
+class EqualWeightBenchmark:
+    """Computes equal weight strategy returns for comparison"""
+    
+    def __init__(self, returns: np.ndarray, num_assets: int):
+        self.returns = returns
+        self.num_assets = num_assets
+        self.weights = np.ones(num_assets) / num_assets
+    
+    def get_returns(self, start_idx: int, end_idx: int) -> List[float]:
+        """Calculate equal weight returns for a specific period"""
+        period_returns = self.returns[start_idx:end_idx]
+        portfolio_returns = np.sum(period_returns * self.weights, axis=1)
+        return portfolio_returns.tolist()
+    
+    def get_metrics(self, returns: List[float]) -> Dict[str, float]:
+        """Calculate performance metrics for a period"""
+        if not returns:
+            return {
+                'mean_return': 0.0,
+                'cumulative_return': 0.0,
+                'sharpe_ratio': 0.0,
+                'volatility': 0.0
+            }
+            
+        returns_array = np.array(returns)
+        cumulative_return = np.prod(1 + returns_array) - 1
+        mean_return = np.mean(returns_array)
+        std_return = np.std(returns_array)
+        sharpe = mean_return / (std_return + 1e-6)
+        
+        return {
+            'mean_return': float(mean_return),
+            'cumulative_return': float(cumulative_return),
+            'sharpe_ratio': float(sharpe),
+            'volatility': float(std_return)
+        }
+
+class ImprovedPortfolioCallback(BaseCallback):
+    """Callback for comparing agent performance with equal weight strategy"""
+    
+    def __init__(self, equal_weight_benchmark: EqualWeightBenchmark, window_size: int = 20, verbose: int = 0):
+        super().__init__(verbose)
+        self.equal_weight_benchmark = equal_weight_benchmark
+        self.window_size = window_size
+        self.episode_count = 0
+        
+        # Current episode tracking
+        self.episode_returns = []
+        self.equal_weight_returns = []
+        
+        # Running average tracking
+        self.agent_metrics_history = []
+        self.equal_metrics_history = []
+        
+    def _on_step(self) -> bool:
+        """Process each step during training"""
+        info = self.locals['infos'][0]  # Get info from first environment
+        try:
+            env = self.training_env.envs[0].env  # Get unwrapped env
+        except Exception as e:
+            env = self.training_env.envs[0]
+
+        # Get current episode indices and returns
+        current_idx = info.get('current_idx')
+        episode_start = info.get('episode_start')
+        k_day_returns = info.get('k_day_returns', [])
+        
+        if k_day_returns:
+            # Get agent's portfolio return
+            self.episode_returns.extend(k_day_returns)
+            
+            # Get equal weight returns for same period
+            start_idx = current_idx - len(k_day_returns)
+            equal_returns = self.equal_weight_benchmark.get_returns(
+                start_idx=start_idx,
+                end_idx=current_idx
+            )
+            self.equal_weight_returns.extend(equal_returns)
+        
+        # Check if episode is done
+        if info.get("episode_end", None) is not None:
+            # Calculate episode metrics
+            agent_metrics = self.equal_weight_benchmark.get_metrics(self.episode_returns)
+            equal_metrics = self.equal_weight_benchmark.get_metrics(self.equal_weight_returns)
+            
+            # Store metrics for running average
+            self.agent_metrics_history.append(agent_metrics)
+            self.equal_metrics_history.append(equal_metrics)
+            
+            # Keep only last window_size episodes
+            if len(self.agent_metrics_history) > self.window_size:
+                self.agent_metrics_history.pop(0)
+                self.equal_metrics_history.pop(0)
+            
+            # Print running average every window_size episodes
+            if self.episode_count % self.window_size == self.window_size - 1:
+                self._print_running_average()
+            
+            # Reset episode tracking
+            self.episode_count += 1
+            self.episode_returns = []
+            self.equal_weight_returns = []
+        
+        return True
+    
+    def _print_running_average(self):
+        """Print running average of metrics over last window_size episodes"""
+        start_episode = max(0, self.episode_count - self.window_size + 1)
+        
+        # Calculate average metrics
+        avg_agent_metrics = {
+            'mean_return': np.mean([m['mean_return'] for m in self.agent_metrics_history]),
+            'cumulative_return': np.mean([m['cumulative_return'] for m in self.agent_metrics_history]),
+            'sharpe_ratio': np.mean([m['sharpe_ratio'] for m in self.agent_metrics_history]),
+            'volatility': np.mean([m['volatility'] for m in self.agent_metrics_history])
+        }
+        
+        avg_equal_metrics = {
+            'mean_return': np.mean([m['mean_return'] for m in self.equal_metrics_history]),
+            'cumulative_return': np.mean([m['cumulative_return'] for m in self.equal_metrics_history]),
+            'sharpe_ratio': np.mean([m['sharpe_ratio'] for m in self.equal_metrics_history]),
+            'volatility': np.mean([m['volatility'] for m in self.equal_metrics_history])
+        }
+        
+        print(f"\nRunning Average over Episodes {start_episode}-{self.episode_count}:")
+        print(f"Agent Portfolio (avg over {len(self.agent_metrics_history)} episodes):")
+        print(f"  Mean Return: {avg_agent_metrics['mean_return']:.4f}")
+        print(f"  Cumulative Return: {avg_agent_metrics['cumulative_return']:.4f}")
+        print(f"  Sharpe Ratio: {avg_agent_metrics['sharpe_ratio']:.4f}")
+        print(f"  Volatility: {avg_agent_metrics['volatility']:.4f}")
+        
+        print(f"\nEqual Weight Portfolio:")
+        print(f"  Mean Return: {avg_equal_metrics['mean_return']:.4f}")
+        print(f"  Cumulative Return: {avg_equal_metrics['cumulative_return']:.4f}")
+        print(f"  Sharpe Ratio: {avg_equal_metrics['sharpe_ratio']:.4f}")
+        print(f"  Volatility: {avg_equal_metrics['volatility']:.4f}")
+        
+        # Print performance comparison
+        return_diff = avg_agent_metrics['mean_return'] - avg_equal_metrics['mean_return']
+        sharpe_diff = avg_agent_metrics['sharpe_ratio'] - avg_equal_metrics['sharpe_ratio']
+        
+        print(f"\nPerformance Difference (Agent - Equal Weight):")
+        print(f"  Mean Return Diff: {return_diff:.4f}")
+        print(f"  Sharpe Ratio Diff: {sharpe_diff:.4f}")
+        print("-" * 50)
+
+class ImprovedPortfolioTrainer:
+    """Improved trainer implementation with proper episode structure"""
+    
+    def __init__(self, prices: np.ndarray, returns: np.ndarray, window_size: int = 20, 
+                 prediction_days: int = 5, num_assets: int = 10):
+        self.prices = prices
+        self.returns = returns
+        self.window_size = window_size
+        self.prediction_days = prediction_days
+        self.num_assets = num_assets
+        
+        # Initialize benchmark with just returns and num_assets
+        self.equal_weight_benchmark = EqualWeightBenchmark(
+            returns=returns,
+            num_assets=num_assets
+        )
+        
+        # Create environment and model
+        self.env = self._create_env()
+        self.model = self._create_model()
+    
+    def _create_env(self) -> VecNormalize:
+        """Create and wrap the environment"""
+        env_config = EnvironmentConfig(
+            window_size=self.window_size,
+            prediction_days=self.prediction_days,
+            num_assets=self.num_assets,
+            observation_types=[ObservationType.RETURNS, ObservationType.PRICES],
+            reward_types=[RewardType.SHARPE, RewardType.DIVERSIFICATION]
+        )
+        
+        def make_env():
+            return FinancialEnv(env_config, self.prices, self.returns)
+        
+        env = DummyVecEnv([make_env])
+        env = VecNormalize(
+            env,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.,
+            clip_reward=10.
+        )
+        return env
+    
+    def _create_model(self) -> PPO:
+        """Create PPO model"""
+        return PPO(
+            "MultiInputPolicy",
+            self.env,
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            verbose=1
+        )
+    
+    def train(self, total_timesteps: int = 1000000):
+        """Train the model with improved episode structure"""
+        callback = ImprovedPortfolioCallback(
+            equal_weight_benchmark=self.equal_weight_benchmark,
+            window_size=20,
+            verbose=1
+        )
+        
+        self.model.learn(
+            total_timesteps=total_timesteps,
+            callback=callback
+        )
+    
+    def save(self, path: str):
+        """Save model and environment normalization stats"""
+        os.makedirs(path, exist_ok=True)
+        self.model.save(os.path.join(path, "final_model"))
+        self.env.save(os.path.join(path, "vec_normalize.pkl"))
+
+def main():
+    """Example usage"""
+    # Load your data here
+    from data_manager import DataManager
+    
+    data_manager = DataManager()
+    prices, returns, tickers = data_manager.load_data(
+        tickers=['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META'],
+        num_assets=5,
+        start_date="2020-01-01",
+        end_date="2022-12-31"
+    )
+    
+    # Create and train the improved portfolio trainer
+    trainer = ImprovedPortfolioTrainer(
+        prices=prices,
+        returns=returns,
+        window_size=20,
+        prediction_days=5,
+        num_assets=5
+    )
+    
+    # Train the model
+    trainer.train(total_timesteps=1000000)
+    
+    # Save the trained model
+    trainer.save("./improved_portfolio_model")
+
+if __name__ == "__main__":
+    main()
+

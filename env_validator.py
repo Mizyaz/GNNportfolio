@@ -64,105 +64,55 @@ class EnvironmentValidator:
             prediction_days=5,
             num_assets=self.num_assets,
             observation_types=[ObservationType.RETURNS],
-            reward_types=[RewardType.SHARPE]
+            reward_types=[RewardType.SHARPE],
+            max_steps=30  # Limit episode length
         )
         
         env = FinancialEnv(config, prices, returns)
-        obs, _ = env.reset()
         
-        total_steps = 0
-        portfolio_returns = []
-        cumulative_return = 1.0
-        
-        # Track monthly performance
-        monthly_returns = []
-        current_month_returns = []
-        last_month = None
+        episode_metrics = []
+        num_episodes = 10
         
         print(f"\nTesting {strategy_name} Strategy ({period}):")
-        print(f"Initial observation shape: {obs['returns'].shape}")
-        print(f"Total data points available: {len(returns)}")
-        print(f"Expected steps (with {config.prediction_days}-day predictions): {len(returns) // config.prediction_days}")
         
-        while True:
-            # Get weights from strategy function
-            weights = weight_func(env)
+        for episode in range(num_episodes):
+            obs, _ = env.reset()
+            done = False
+            episode_returns = []
             
-            if total_steps == 0:
-                print(f"\nInitial portfolio weights:")
-                print(f"Weights: {weights}")
-                print(f"Weights sum: {np.sum(weights)}")
+            print(f"\nEpisode {episode + 1}:")
+            print(f"Start index: {env.episode_start_idx}")
             
-            # Take step in environment
-            obs, reward, done, _, info = env.step(weights)
+            while not done:
+                weights = weight_func(env)
+                obs, reward, done, _, info = env.step(weights)
+                episode_returns.extend(info.get('k_day_returns', []))
             
-            # Record returns
-            if 'portfolio_return' in info:
-                step_return = info['portfolio_return']
-                portfolio_returns.append(step_return)
-                cumulative_return *= (1 + step_return)
-                
-                # Track monthly performance
-                if 'current_date' in info:
-                    current_month = info['current_date'].month
-                    if last_month is None:
-                        last_month = current_month
-                    elif current_month != last_month:
-                        if current_month_returns:
-                            monthly_return = (np.prod([1 + r for r in current_month_returns]) - 1) * 100
-                            monthly_returns.append(monthly_return)
-                        current_month_returns = []
-                        last_month = current_month
-                    current_month_returns.append(step_return)
-                
-                # Print progress every 25 steps
-                if total_steps % 25 == 0:
-                    print(f"\nStep {total_steps}:")
-                    print(f"Current return: {step_return:.4f}")
-                    print(f"Cumulative return so far: {(cumulative_return - 1) * 100:.2f}%")
-            else:
-                print(f"Warning: No portfolio returns in info dict at step {total_steps}")
-                print(f"Info keys available: {info.keys()}")
+            print(f"End index: {env.episode_end_idx}")
+            print(f"Episode length: {len(episode_returns)} days")
+            print(f"Cumulative return: {info['episode_cumulative_return']:.4f}")
+            print(f"Sharpe ratio: {info['episode_sharpe']:.4f}")
             
-            total_steps += 1
-            
-            if done:
-                break
+            episode_metrics.append(info)
         
-        # Calculate performance metrics
-        if portfolio_returns:
-            mean_return = np.mean(portfolio_returns)
-            std_return = np.std(portfolio_returns)
-            sharpe = mean_return / (std_return + 1e-6)
-            total_return = (cumulative_return - 1) * 100  # Convert to percentage
-            
-            # Calculate drawdown
-            cumulative_returns = np.cumprod(1 + np.array(portfolio_returns))
-            rolling_max = np.maximum.accumulate(cumulative_returns)
-            drawdowns = (cumulative_returns - rolling_max) / rolling_max
-            max_drawdown = np.min(drawdowns) * 100  # Convert to percentage
-        else:
-            mean_return = std_return = sharpe = total_return = max_drawdown = 0
-        
-        # Print final summary
-        print(f"\n{strategy_name} Strategy ({period}) - Final Summary:")
-        print(f"Total steps completed: {total_steps}")
-        print(f"Total returns recorded: {len(portfolio_returns)}")
-        if monthly_returns:
-            print("\nMonthly Returns Summary:")
-            print(f"Average Monthly Return: {np.mean(monthly_returns):.2f}%")
-            print(f"Best Month: {np.max(monthly_returns):.2f}%")
-            print(f"Worst Month: {np.min(monthly_returns):.2f}%")
+        # Calculate aggregate statistics
+        cumulative_returns = [m['episode_cumulative_return'] for m in episode_metrics]
+        sharpe_ratios = [m['episode_sharpe'] for m in episode_metrics]
         
         return {
-            'total_return': total_return,
-            'mean_return': mean_return * 100,  # Convert to percentage
-            'std_return': std_return * 100,  # Convert to percentage
-            'sharpe_ratio': sharpe,
-            'max_drawdown': max_drawdown,
-            'num_steps': total_steps,
-            'num_returns': len(portfolio_returns),
-            'monthly_returns': monthly_returns if monthly_returns else None
+            'mean_cumulative_return': np.mean(cumulative_returns),
+            'std_cumulative_return': np.std(cumulative_returns),
+            'mean_sharpe': np.mean(sharpe_ratios),
+            'std_sharpe': np.std(sharpe_ratios),
+            'num_episodes': num_episodes,
+            "total_return": np.mean(cumulative_returns),
+            "mean_return": np.mean(cumulative_returns),
+            "std_return": np.std(cumulative_returns),
+            "sharpe_ratio": np.mean(sharpe_ratios),
+            "max_drawdown": np.min(cumulative_returns),
+            "num_steps": num_episodes,
+            "num_returns": num_episodes,
+            "quarter_returns": [np.mean(cumulative_returns[i:i+3]) for i in range(0, len(cumulative_returns), 3)]
         }
     
     def compare_strategies(self):
@@ -236,19 +186,35 @@ class EnvironmentValidator:
             print(f"Maximum Drawdown: {results['max_drawdown']:.2f}%")
             print(f"Number of Steps: {results['num_steps']}")
             print(f"Number of Returns: {results['num_returns']}")
-            if results['monthly_returns']:
-                print("\nMonthly Performance:")
-                print(f"Average Monthly Return: {np.mean(results['monthly_returns']):.2f}%")
-                print(f"Best Month: {np.max(results['monthly_returns']):.2f}%")
-                print(f"Worst Month: {np.min(results['monthly_returns']):.2f}%")
+            if results['quarter_returns']:
+                print("\nQuarterly Performance:")
+                for i, qret in enumerate(results['quarter_returns'], 1):
+                    print(f"Q{i}: {qret:.2f}%")
         
         print("\nTraining Period Results:")
+        print("-" * 30)
         print_strategy_results(train_equal_weight, "Equal Weight", "Training")
+        print("\nVS\n")
         print_strategy_results(train_random_weight, "Random Weight", "Training")
         
         print("\nValidation Period Results:")
+        print("-" * 30)
         print_strategy_results(val_equal_weight, "Equal Weight", "Validation")
+        print("\nVS\n")
         print_strategy_results(val_random_weight, "Random Weight", "Validation")
+        
+        # Print strategy comparison summary
+        print("\nStrategy Comparison Summary:")
+        print("-" * 30)
+        print("\nTraining Period:")
+        print(f"Equal Weight vs Random Weight:")
+        print(f"Total Return Difference: {train_equal_weight['total_return'] - train_random_weight['total_return']:.2f}%")
+        print(f"Sharpe Ratio Difference: {train_equal_weight['sharpe_ratio'] - train_random_weight['sharpe_ratio']:.2f}")
+        
+        print("\nValidation Period:")
+        print(f"Equal Weight vs Random Weight:")
+        print(f"Total Return Difference: {val_equal_weight['total_return'] - val_random_weight['total_return']:.2f}%")
+        print(f"Sharpe Ratio Difference: {val_equal_weight['sharpe_ratio'] - val_random_weight['sharpe_ratio']:.2f}")
         
         print("\nValidation Complete!")
 
