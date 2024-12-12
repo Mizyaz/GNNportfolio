@@ -90,7 +90,7 @@ class PortfolioTrainer:
         print(f"Equal-Weight Cumulative Return: {cumulative_return:.2%}")
         return cumulative_return
     
-    def initialize_environment(self, prices: pd.DataFrame, returns: pd.DataFrame):
+    def initialize_environment(self, prices: pd.DataFrame, returns: pd.DataFrame, test_prices: pd.DataFrame, test_returns: pd.DataFrame):
         """
         Initialize the custom environment.
         
@@ -100,6 +100,8 @@ class PortfolioTrainer:
         """
         # Initialize the environment
         self.env = PortfolioEnv(config=self.env_config, prices=prices, returns=returns)
+
+        self.test_env = PortfolioEnv(config=self.env_config, prices=test_prices, returns=test_returns)
         
         # Wrap the environment with a callback for logging
         self.env = TrainingCallback(self.env)
@@ -109,7 +111,7 @@ class PortfolioTrainer:
         check_env(self.env, warn=True)
         print("Environment is compatible.")
     
-    def train(self, prices: pd.DataFrame, returns: pd.DataFrame, total_timesteps: int = 100000):
+    def train(self, prices: pd.DataFrame, returns: pd.DataFrame, test_prices: pd.DataFrame, test_returns: pd.DataFrame, total_timesteps: int = 100000):
         """
         Train the PPO model.
         
@@ -119,7 +121,7 @@ class PortfolioTrainer:
             total_timesteps (int): Number of timesteps to train.
         """
         # Initialize the environment
-        self.initialize_environment(prices, returns)
+        self.initialize_environment(prices, returns, test_prices, test_returns)
         
         # Initialize the PPO model
         print("Initializing PPO model...")
@@ -157,21 +159,21 @@ class PortfolioTrainer:
         """
         print(f"Evaluating the model over {episodes} episodes...")
         for episode in range(episodes):
-            obs, info = self.env.reset()
+            obs, info = self.test_env.reset()
             done = False
             truncated = False
             total_reward = 0.0
             while not done and not truncated:
                 action, _states = self.model.predict(obs, deterministic=True)
-                obs, reward, done, truncated, info = self.env.step(action)
+                obs, reward, done, truncated, info = self.test_env.step(action)
                 total_reward += reward
             print(f"Episode {episode + 1}: Total Return: {total_reward:.2%}")
         
         # Render the last episode's performance
         print("Rendering portfolio performance...")
-        self.env.render()
+        self.test_env.render()
     
-    def run(self, tickers: List[str], start_date: str, end_date: str, total_timesteps: int = 100000, episodes: int = 5):
+    def run(self, tickers: List[str], start_date: str, end_date: str, test_start_date: str, test_end_date: str, total_timesteps: int = 100000, episodes: int = 5):
         """
         Full run: download data, compute equal-weighted return, train, evaluate.
         
@@ -184,12 +186,14 @@ class PortfolioTrainer:
         """
         # Download data
         prices, returns = self.download_data(tickers, start_date, end_date)
+
+        test_prices, test_returns = self.download_data(tickers, test_start_date, test_end_date)
         
         # Compute and print equal-weighted cumulative return
         self.compute_equal_weight_cumulative_return(returns)
         
         # Train the model
-        self.train(prices, returns, total_timesteps)
+        self.train(prices, returns, test_prices, test_returns, total_timesteps)
         
         # Evaluate the model
         self.evaluate(returns, episodes)
@@ -200,8 +204,11 @@ if __name__ == "__main__":
                'NVDA', 'TSLA', 'JPM', 'JNJ', 'PG']
     
     # Time period for training
-    start_date = "2022-01-01"
+    start_date = "2021-01-01"
     end_date = "2023-01-01"
+
+    test_start_date = "2023-01-01"
+    test_end_date = "2024-01-01"
     
     # Environment configuration
     env_config = {
@@ -209,10 +216,10 @@ if __name__ == "__main__":
         'num_assets': len(tickers),
         'risk_free_rate': 0.02,  # 2% annual risk-free rate
         'metrics_list': [
-            #('sharpe_ratio', 0.3),          # 30% weight
+            ('sharpe_ratio', 0.03),          # 30% weight
             ('sortino_ratio', 0.02),         # 20% weight
-            #('maximum_drawdown', -0.2),      # 20% weight (negative weight as we want to minimize)
-            #('portfolio_volatility', -0.1),  # 10% weight (negative weight as we want to minimize)
+            ('maximum_drawdown', -0.02),      # 20% weight (negative weight as we want to minimize)
+            ('portfolio_volatility', -0.01),  # 10% weight (negative weight as we want to minimize)
             ('cumulative_returns', 0.02),     # 20% weight
         ]
     }
@@ -243,6 +250,8 @@ if __name__ == "__main__":
         tickers=tickers,
         start_date=start_date,
         end_date=end_date,
+        test_start_date=test_start_date,
+        test_end_date=test_end_date,
         total_timesteps=training_params['total_timesteps'],
         episodes=training_params['eval_episodes']
     )
