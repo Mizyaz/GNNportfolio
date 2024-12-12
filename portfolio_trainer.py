@@ -101,7 +101,7 @@ class PortfolioTrainer:
     def _create_model(self) -> PPO:
         """Create PPO model"""
         return PPO(
-            "MlpPolicy",
+            "MultiInputPolicy",
             self.train_env,
             verbose=1,
             **self.model_params
@@ -195,21 +195,47 @@ def main():
         # Initialize data manager with logging
         data_manager = DataManager()
         
+        tickers = [
+            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'JPM', 'V', 'PG', 'MA',
+            'HD', 'BAC', 'CVX', 'KO', 'PFE', 'DIS', 'WMT', 'MRK', 'XOM', 'ORCL'
+        ]
+
+        periods = [
+            ("2020-01-01", "2022-12-31"),
+            ("2022-01-01", "2023-12-31")
+        ]
+
+        Xs = []
+        ys = []
+        selected_tickers = []
+
+        for start_date, end_date in periods:
+            num_assets = 10  # Change as needed
+            print(f"\nLoading data for period {start_date} to {end_date} with {num_assets} assets")
+            X, y, selected_tickers = data_manager.load_data(
+                tickers=tickers,
+                num_assets=num_assets,
+                start_date=start_date,
+                end_date=end_date
+                
+            )
+
+            Xs.append(X)
+            ys.append(y)
+            selected_tickers.append(selected_tickers)
+
+            print(f"Data shapes:")
+            print(f"X: {X.shape}")  # Expected: (num_days, num_assets)
+            print(f"y: {y.shape}")  # Expected: (num_days, num_assets)
+            print(f"Number of assets: {len(selected_tickers)}")
+            
+
         # Try loading training data
         print("Loading training data...")
-        train_data = data_manager.load_data(
-            num_assets=10,
-            start_date="2018-01-01",
-            end_date="2021-12-31",
-            force_reload=True  # Force reload for testing
-        )
+        train_data = (Xs[0], ys[0], selected_tickers[0])
         
         print("Loading validation data...")
-        val_data = data_manager.load_data(
-            num_assets=10,
-            start_date="2022-01-01",
-            end_date="2022-12-31"
-        )
+        val_data = (Xs[1], ys[1], selected_tickers[1])
         
         # Validate data shapes
         train_prices, train_returns, train_tickers = train_data

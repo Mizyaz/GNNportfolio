@@ -75,16 +75,17 @@ class DataManager:
         # Define filenames with sorted tickers to ensure consistency
         sorted_tickers = sorted(tickers)
         tickers_key = '_'.join(sorted_tickers[:num_assets])
-        x_file = f"x_train_{tickers_key}_{start_date}_{end_date}.pkl"
-        y_file = f"y_train_{tickers_key}_{start_date}_{end_date}.pkl"
-        tickers_file = f"tickers_{tickers_key}_{start_date}_{end_date}.pkl"
+        x_file = f"x_train_{num_assets}_{start_date}_{end_date}.pkl"
+        y_file = f"y_train_{num_assets}_{start_date}_{end_date}.pkl"
+        tickers_file = f"tickers_{num_assets}_{start_date}_{end_date}.pkl"
 
-        x_path = os.path.join(self.data_dir, x_file)
-        y_path = os.path.join(self.data_dir, y_file)
-        tickers_path = os.path.join(self.data_dir, tickers_file)
+        x_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), x_file)
+        y_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), y_file)
+        tickers_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), tickers_file)
 
-        if all(os.path.exists(p) for p in [x_path, y_path, tickers_path]):
-            self.logger.info(f"Loading cached data for tickers: {sorted_tickers[:num_assets]} from {start_date} to {end_date}")
+        print("trying to load")
+
+        try:
             with open(x_path, 'rb') as f:
                 X = pickle.load(f)
             with open(y_path, 'rb') as f:
@@ -92,8 +93,9 @@ class DataManager:
             with open(tickers_path, 'rb') as f:
                 loaded_tickers = pickle.load(f)
             return X, y, loaded_tickers
-
-        return None
+        except Exception as e:
+            print(e)
+            return None
 
     def _download_and_cache_data(self, tickers: List[str], num_assets: int, start_date: str, end_date: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """Download data from yfinance and cache it."""
@@ -147,11 +149,11 @@ class DataManager:
         min_length = min(len(prices) for prices in all_prices)
 
         # Trim all arrays to the minimum length
-        X = np.column_stack([prices[-min_length:] for prices in all_prices])  # Shape: (num_days, num_assets)
-        y = np.column_stack([returns[-min_length:] for returns in all_returns])  # Shape: (num_days, num_assets)
+        X = np.column_stack([prices[-min_length:, :num_assets] for prices in all_prices])  # Shape: (num_days, num_assets)
+        y = np.column_stack([returns[-min_length:, :num_assets] for returns in all_returns])  # Shape: (num_days, num_assets)
 
         # Save to cache
-        self._save_to_cache(X, y, selected_tickers, num_assets, start_date, end_date)
+        self._save_to_cache(X, y, selected_tickers[:num_assets], num_assets, start_date, end_date)
 
         return X, y, selected_tickers
 
@@ -160,13 +162,13 @@ class DataManager:
         """Save data to cache."""
         sorted_tickers = sorted(tickers)
         tickers_key = '_'.join(sorted_tickers[:num_assets])
-        x_file = f"x_train_{tickers_key}_{start_date}_{end_date}.pkl"
-        y_file = f"y_train_{tickers_key}_{start_date}_{end_date}.pkl"
-        tickers_file = f"tickers_{tickers_key}_{start_date}_{end_date}.pkl"
+        x_file = f"x_train_{len(tickers)}_{start_date}_{end_date}.pkl"
+        y_file = f"y_train_{len(tickers)}_{start_date}_{end_date}.pkl"
+        tickers_file = f"tickers_{len(tickers)}_{start_date}_{end_date}.pkl"
 
-        x_path = os.path.join(self.data_dir, x_file)
-        y_path = os.path.join(self.data_dir, y_file)
-        tickers_path = os.path.join(self.data_dir, tickers_file)
+        x_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), x_file)
+        y_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), y_file)
+        tickers_path = os.path.join(os.path.join(os.getcwd(), self.data_dir), tickers_file)
 
         with open(x_path, 'wb') as f:
             pickle.dump(X, f)
@@ -204,7 +206,8 @@ def main():
                 tickers=tickers,
                 num_assets=num_assets,
                 start_date=start_date,
-                end_date=end_date
+                end_date=end_date,
+                force_reload=False
             )
 
             print(f"Data shapes:")

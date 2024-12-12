@@ -1,0 +1,43 @@
+{
+  "os": "Windows-10-10.0.26100-SP0",
+  "python": "CPython 3.11.9",
+  "startedAt": "2024-12-12T14:31:28.388645Z",
+  "program": "c:\\Users\\islam\\OneDrive\\Belgeler\\GitHub\\GNNportfolio\\portfolio_trainer.py",
+  "codePath": "portfolio_trainer.py",
+  "git": {
+    "remote": "https://github.com/Mizyaz/GNNportfolio.git",
+    "commit": "b1aab9f1b7548f49f5d1d715a70429e2c1590f1f"
+  },
+  "email": "islam.guven@ozu.edu.tr",
+  "root": "C:\\Users\\islam\\OneDrive\\Belgeler\\GitHub\\GNNportfolio",
+  "host": "DESKTOP-D9D7M9B",
+  "username": "islam",
+  "executable": "C:\\Users\\islam\\AppData\\Local\\Microsoft\\WindowsApps\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\python.exe",
+  "codePathLocal": "portfolio_trainer.py",
+  "cpu_count": 8,
+  "cpu_count_logical": 16,
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "510289506304",
+      "used": "461922603008"
+    }
+  },
+  "memory": {
+    "total": "16366571520"
+  },
+  "cpu": {
+    "count": 8,
+    "countLogical": 16
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "memoryTotal": "8585740288",
+      "cudaCores": 3072,
+      "architecture": "Ada"
+    }
+  ],
+  "cudaVersion": "12.7"
+}

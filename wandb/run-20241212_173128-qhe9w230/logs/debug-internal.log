@@ -1,0 +1,8 @@
+{"time":"2024-12-12T17:31:28.4035848+03:00","level":"INFO","msg":"using version","core version":"0.19.0"}
+{"time":"2024-12-12T17:31:28.4035848+03:00","level":"INFO","msg":"created symlink","path":"C:\\Users\\islam\\OneDrive\\Belgeler\\GitHub\\GNNportfolio\\wandb\\run-20241212_173128-qhe9w230\\logs\\debug-core.log"}
+{"time":"2024-12-12T17:31:28.8785933+03:00","level":"INFO","msg":"created new stream","id":"qhe9w230"}
+{"time":"2024-12-12T17:31:28.879135+03:00","level":"INFO","msg":"stream: started","id":"qhe9w230"}
+{"time":"2024-12-12T17:31:28.879135+03:00","level":"INFO","msg":"writer: Do: started","stream_id":"qhe9w230"}
+{"time":"2024-12-12T17:31:28.879135+03:00","level":"INFO","msg":"handler: started","stream_id":"qhe9w230"}
+{"time":"2024-12-12T17:31:28.879135+03:00","level":"INFO","msg":"sender: started","stream_id":"qhe9w230"}
+{"time":"2024-12-12T17:31:29.3300467+03:00","level":"INFO","msg":"Starting system monitor"}
