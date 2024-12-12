@@ -1,0 +1,248 @@
+import os
+from typing import Dict, Any, Optional, List
+import numpy as np
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+import wandb
+from financial_env import FinancialEnv, EnvironmentConfig
+from data_manager import DataManager
+
+class PortfolioCallback(BaseCallback):
+    """Custom callback for logging portfolio metrics"""
+    
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.returns = []
+        self.sharpe_ratios = []
+        self.turnovers = []
+        
+    def _on_step(self) -> bool:
+        """Called after each step"""
+        info = self.locals['infos'][0]  # Get info from first environment
+        
+        # Log metrics
+        self.returns.append(info['portfolio_return'])
+        self.sharpe_ratios.append(info['reward_components'].get('sharpe', 0))
+        
+        # Log to wandb if available
+        if wandb.run is not None:
+            wandb.log({
+                'portfolio_return': info['portfolio_return'],
+                'sharpe_ratio': info['reward_components'].get('sharpe', 0),
+                'diversification': info['reward_components'].get('diversification', 0),
+                'weights_std': np.std(info['weights'])
+            })
+        
+        return True
+
+class PortfolioTrainer:
+    """Trainer for portfolio optimization using PPO"""
+    
+    def __init__(
+        self,
+        config: EnvironmentConfig,
+        model_params: Dict[str, Any],
+        train_data: tuple,
+        val_data: Optional[tuple] = None,
+        use_wandb: bool = False,
+        project_name: str = "portfolio_optimization"
+    ):
+        """
+        Initialize trainer
+        
+        Parameters:
+        -----------
+        config : EnvironmentConfig
+            Environment configuration
+        model_params : Dict[str, Any]
+            PPO model parameters
+        train_data : tuple
+            Training data (prices, returns, tickers)
+        val_data : Optional[tuple]
+            Validation data (prices, returns, tickers)
+        use_wandb : bool
+            Whether to use Weights & Biases logging
+        project_name : str
+            Project name for wandb
+        """
+        self.config = config
+        self.model_params = model_params
+        self.train_data = train_data
+        self.val_data = val_data
+        self.use_wandb = use_wandb
+        self.project_name = project_name
+        
+        # Initialize environments
+        self.train_env = self._create_env(train_data)
+        self.eval_env = self._create_env(val_data) if val_data else None
+        
+        # Initialize model
+        self.model = self._create_model()
+        
+    def _create_env(self, data: tuple) -> VecNormalize:
+        """Create and wrap environment"""
+        def make_env():
+            env = FinancialEnv(self.config)
+            env = Monitor(env)
+            return env
+        
+        env = DummyVecEnv([make_env])
+        env = VecNormalize(
+            env,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.,
+            clip_reward=10.
+        )
+        return env
+    
+    def _create_model(self) -> PPO:
+        """Create PPO model"""
+        return PPO(
+            "MlpPolicy",
+            self.train_env,
+            verbose=1,
+            **self.model_params
+        )
+    
+    def train(
+        self,
+        total_timesteps: int,
+        eval_freq: int = 10000,
+        n_eval_episodes: int = 5,
+        save_path: Optional[str] = None
+    ):
+        """Train the model"""
+        # Initialize wandb
+        if self.use_wandb:
+            wandb.init(project=self.project_name)
+        
+        # Create callbacks
+        callbacks = [PortfolioCallback()]
+        
+        if self.eval_env is not None:
+            eval_callback = EvalCallback(
+                self.eval_env,
+                best_model_save_path=save_path,
+                log_path=save_path,
+                eval_freq=eval_freq,
+                deterministic=True,
+                render=False,
+                n_eval_episodes=n_eval_episodes
+            )
+            callbacks.append(eval_callback)
+        
+        # Train model
+        self.model.learn(
+            total_timesteps=total_timesteps,
+            callback=callbacks
+        )
+        
+        # Save final model
+        if save_path:
+            self.model.save(os.path.join(save_path, "final_model"))
+            self.train_env.save(os.path.join(save_path, "vec_normalize.pkl"))
+        
+        if self.use_wandb:
+            wandb.finish()
+    
+    def evaluate(
+        self,
+        n_episodes: int = 10,
+        deterministic: bool = True
+    ) -> Dict[str, float]:
+        """Evaluate the model"""
+        episode_rewards = []
+        episode_lengths = []
+        portfolio_returns = []
+        sharpe_ratios = []
+        
+        for _ in range(n_episodes):
+            obs = self.eval_env.reset()
+            done = False
+            episode_reward = 0
+            episode_length = 0
+            episode_returns = []
+            
+            while not done:
+                action, _ = self.model.predict(obs, deterministic=deterministic)
+                obs, reward, done, info = self.eval_env.step(action)
+                
+                episode_reward += reward
+                episode_length += 1
+                episode_returns.append(info[0]['portfolio_return'])
+            
+            episode_rewards.append(episode_reward)
+            episode_lengths.append(episode_length)
+            portfolio_returns.append(np.mean(episode_returns))
+            sharpe_ratios.append(
+                np.mean(episode_returns) / (np.std(episode_returns) + 1e-6)
+            )
+        
+        return {
+            'mean_reward': np.mean(episode_rewards),
+            'std_reward': np.std(episode_rewards),
+            'mean_length': np.mean(episode_lengths),
+            'mean_return': np.mean(portfolio_returns),
+            'sharpe_ratio': np.mean(sharpe_ratios)
+        }
+
+def main():
+    """Example usage"""
+    # Load data
+    data_manager = DataManager()
+    train_data = data_manager.load_data(
+        num_assets=10,
+        start_date="2018-01-01",
+        end_date="2021-12-31"
+    )
+    val_data = data_manager.load_data(
+        num_assets=10,
+        start_date="2022-01-01",
+        end_date="2022-12-31"
+    )
+    
+    # Create config
+    config = EnvironmentConfig(
+        window_size=20,
+        num_assets=10
+    )
+    
+    # Model parameters
+    model_params = {
+        "learning_rate": 3e-4,
+        "n_steps": 2048,
+        "batch_size": 64,
+        "n_epochs": 10,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "clip_range": 0.2,
+        "ent_coef": 0.01
+    }
+    
+    # Create trainer
+    trainer = PortfolioTrainer(
+        config=config,
+        model_params=model_params,
+        train_data=train_data,
+        val_data=val_data,
+        use_wandb=True
+    )
+    
+    # Train model
+    trainer.train(
+        total_timesteps=1_000_000,
+        eval_freq=10000,
+        save_path="./models"
+    )
+    
+    # Evaluate model
+    results = trainer.evaluate(n_episodes=10)
+    print("\nEvaluation Results:")
+    for metric, value in results.items():
+        print(f"{metric}: {value:.4f}")
+
+if __name__ == "__main__":
+    main()
