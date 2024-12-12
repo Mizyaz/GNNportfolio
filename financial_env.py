@@ -28,6 +28,7 @@ class RewardType(Enum):
 class EnvironmentConfig:
     """Configuration for the financial environment"""
     window_size: int = 20
+    prediction_days: int = 5
     num_assets: int = 10
     observation_types: List[ObservationType] = None
     reward_types: List[RewardType] = None
@@ -35,6 +36,7 @@ class EnvironmentConfig:
     risk_free_rate: float = 0.02
     target_volatility: float = 0.15
     regularization_factor: float = 1e-6
+    max_steps: Optional[int] = None
     
     def __post_init__(self):
         if self.observation_types is None:
@@ -149,9 +151,15 @@ class FinancialEnv(gym.Env):
     reward components that can be combined flexibly.
     """
     
-    def __init__(self, config: EnvironmentConfig):
-        """Initialize environment"""
+    def __init__(self, config: EnvironmentConfig, full_prices: np.ndarray, full_returns: np.ndarray):
+        """Initialize environment with full data"""
         self.config = config
+        self.full_prices = full_prices
+        self.full_returns = full_returns
+        
+        # Set max_steps based on data length if not specified
+        if self.config.max_steps is None:
+            self.config.max_steps = (len(full_returns) - self.config.window_size) // self.config.prediction_days
         
         # Create action and observation spaces
         self.action_space = gym.spaces.Box(
@@ -172,66 +180,96 @@ class FinancialEnv(gym.Env):
         self.financial_metrics = FinancialMetrics()
         self.reward_functions = RewardFactory.create_reward_functions(config)
         
-        # Initialize histories with zeros
+        # Initialize state variables
+        self.current_step = 0
+        self.current_idx = 0
         self.returns_history = None
         self.prices_history = None
         self.previous_weights = None
-        self.current_step = 0
-        
+
     def reset(self, seed=None, options=None):
-        """Reset environment with proper initialization"""
+        """Reset environment to start from window_size day"""
         super().reset(seed=seed)
         
-        # Initialize histories with small random values
-        self.returns_history = np.random.normal(0, 0.001, 
-            size=(self.config.window_size, self.config.num_assets))
-        self.prices_history = np.ones((self.config.window_size, self.config.num_assets))
-        # Initialize prices with cumulative returns
-        for i in range(1, self.config.window_size):
-            self.prices_history[i] = self.prices_history[i-1] * (1 + self.returns_history[i])
-        
+        # Start from window_size day
+        self.current_idx = self.config.window_size
         self.current_step = 0
+        
+        # Initialize histories with actual data
+        self.returns_history = self.full_returns[
+            self.current_idx - self.config.window_size:self.current_idx
+        ]
+        self.prices_history = self.full_prices[
+            self.current_idx - self.config.window_size:self.current_idx
+        ]
+        
         self.previous_weights = np.ones(self.config.num_assets) / self.config.num_assets
         
         return self._get_observation(), {}
     
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
-        """Execute one step in the environment with proper history management"""
+        """Execute one step, applying weights for K days"""
         try:
             # Normalize action to valid portfolio weights
             weights = self._normalize_weights(action)
             
-            # Calculate portfolio return
-            current_returns = self.returns_history[-1]
-            portfolio_return = np.dot(weights, current_returns)
+            # Calculate returns for the next K days
+            k_day_returns = []
+            k_day_prices = []
             
-            # Update histories with safeguards
-            self._update_histories(portfolio_return)
+            for k in range(self.config.prediction_days):
+                day_idx = self.current_idx + k
+                if day_idx >= len(self.full_returns):
+                    break
+                    
+                # Calculate daily return
+                daily_return = np.dot(weights, self.full_returns[day_idx])
+                k_day_returns.append(daily_return)
+                k_day_prices.append(self.full_prices[day_idx])
             
-            # Calculate reward with safeguards
+            # Calculate average return over K days
+            if k_day_returns:
+                portfolio_return = np.mean(k_day_returns)
+            else:
+                portfolio_return = 0.0
+            
+            # Update current index and histories
+            self.current_idx += self.config.prediction_days
+            self.current_step += 1
+            
+            # Update histories with the most recent window
+            if self.current_idx < len(self.full_returns):
+                self.returns_history = self.full_returns[
+                    self.current_idx - self.config.window_size:self.current_idx
+                ]
+                self.prices_history = self.full_prices[
+                    self.current_idx - self.config.window_size:self.current_idx
+                ]
+            
+            # Calculate reward
             reward = self._calculate_reward(weights)
             
-            # Get observation with safeguards
+            # Get new observation
             observation = self._get_observation()
             
             # Check if episode is done
-            done = self.current_step >= self.config.window_size
+            done = (self.current_idx >= len(self.full_returns) - self.config.prediction_days or 
+                   self.current_step >= self.config.max_steps)
             
             # Store info
             info = {
                 'portfolio_return': float(portfolio_return),
-                'weights': weights.tolist(),  # Convert to list for better serialization
-                'reward_components': self._get_reward_components(weights)
+                'weights': weights.tolist(),
+                'reward_components': self._get_reward_components(weights),
+                'k_day_returns': k_day_returns
             }
             
-            self.previous_weights = weights.copy()  # Make a copy to be safe
-            self.current_step += 1
+            self.previous_weights = weights.copy()
             
             return observation, reward, done, False, info
             
         except Exception as e:
             print(f"Warning: Error in step: {e}")
-            # Return safe default values
             return self._get_observation(), -1.0, True, False, {
                 'portfolio_return': 0.0,
                 'weights': np.ones(self.config.num_assets).tolist() / self.config.num_assets,
