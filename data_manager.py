@@ -3,20 +3,19 @@ import pickle
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from typing import Tuple, List, Optional, Dict
-from datetime import datetime
-import hashlib
+from typing import Tuple, List, Optional
 import logging
+import time
 
 class DataManager:
-    """Manager for financial data loading and caching"""
-    
-    def __init__(self, cache_dir: str = 'data_cache'):
-        self.cache_dir = cache_dir
+    """Simplified Manager for financial data loading and caching"""
+
+    def __init__(self, data_dir: str = 'rl_data'):
+        self.data_dir = data_dir
         self.logger = logging.getLogger(__name__)
         self._setup_logging()
-        os.makedirs(cache_dir, exist_ok=True)
-        
+        os.makedirs(data_dir, exist_ok=True)
+
     def _setup_logging(self):
         if not self.logger.handlers:
             handler = logging.StreamHandler()
@@ -26,179 +25,196 @@ class DataManager:
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
             self.logger.setLevel(logging.INFO)
-    
-    def _generate_cache_key(self, params: Dict) -> str:
-        """Generate unique cache key based on parameters"""
-        param_str = str(sorted(params.items()))
-        return hashlib.md5(param_str.encode()).hexdigest()
-    
-    def _get_cache_path(self, key: str, data_type: str) -> str:
-        """Get cache file path"""
-        return os.path.join(self.cache_dir, f"{data_type}_{key}.pkl")
-    
+
     def load_data(self,
+                 tickers: List[str],
                  num_assets: int = 10,
                  start_date: str = "2020-01-01",
                  end_date: str = "2022-12-31",
-                 force_reload: bool = False,
-                 include_features: bool = True) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+                 force_reload: bool = False) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """
-        Load or download financial data
-        
+        Load or download financial data.
+
         Parameters:
         -----------
+        tickers : List[str]
+            List of ticker symbols to download.
         num_assets : int
-            Number of assets to include
+            Number of assets to include.
         start_date : str
-            Start date for data collection
+            Start date for data collection (YYYY-MM-DD).
         end_date : str
-            End date for data collection
+            End date for data collection (YYYY-MM-DD).
         force_reload : bool
-            If True, force reload data even if cached
-        include_features : bool
-            If True, include additional features
-            
+            If True, force reload data even if it exists.
+
         Returns:
         --------
-        Tuple[np.ndarray, np.ndarray, List[str]]
-            prices, returns, and ticker list
+        Tuple containing:
+            - X (np.ndarray): Price data of shape (num_days, num_assets).
+            - y (np.ndarray): Return data of shape (num_days, num_assets).
+            - selected_tickers (List[str]): List of asset tickers.
         """
-        params = {
-            'num_assets': num_assets,
-            'start_date': start_date,
-            'end_date': end_date,
-            'include_features': include_features
-        }
-        cache_key = self._generate_cache_key(params)
-        
-        if not force_reload:
-            cached_data = self._load_from_cache(cache_key)
-            if cached_data is not None:
-                self.logger.info("Using cached data")
-                return cached_data
-        
-        self.logger.info(f"Downloading data for {num_assets} assets...")
-        
-        # Load tickers
-        tickers = self._load_tickers(num_assets)
-        
-        # Download data
-        data = self._download_data(tickers, start_date, end_date)
-        
-        # Process data
-        prices, returns = self._process_data(data)
-        
-        # Add features if requested
-        if include_features:
-            features = self._calculate_features(prices, returns)
-            processed_data = (prices, returns, features, tickers)
-        else:
-            processed_data = (prices, returns, tickers)
-        
-        # Cache the results
-        self._save_to_cache(cache_key, processed_data)
-        
-        return processed_data
-    
-    def _load_from_cache(self, key: str) -> Optional[Tuple]:
-        """Load data from cache"""
         try:
-            cache_path = self._get_cache_path(key, 'data')
-            if os.path.exists(cache_path):
-                with open(cache_path, 'rb') as f:
-                    return pickle.load(f)
+            if not force_reload:
+                # Try loading from cache first
+                cached_data = self._load_from_cache(tickers, num_assets, start_date, end_date)
+                if cached_data is not None:
+                    return cached_data
+
+            # If not in cache or force_reload, download new data
+            self.logger.info("Downloading new data from yfinance...")
+            return self._download_and_cache_data(tickers, num_assets, start_date, end_date)
+
         except Exception as e:
-            self.logger.warning(f"Cache load failed: {e}")
+            self.logger.error(f"Error loading data: {str(e)}")
+            raise
+
+    def _load_from_cache(self, tickers: List[str], num_assets: int, start_date: str, end_date: str) -> Optional[Tuple[np.ndarray, np.ndarray, List[str]]]:
+        """Try loading data from cache."""
+        # Define filenames with sorted tickers to ensure consistency
+        sorted_tickers = sorted(tickers)
+        tickers_key = '_'.join(sorted_tickers[:num_assets])
+        x_file = f"x_train_{tickers_key}_{start_date}_{end_date}.pkl"
+        y_file = f"y_train_{tickers_key}_{start_date}_{end_date}.pkl"
+        tickers_file = f"tickers_{tickers_key}_{start_date}_{end_date}.pkl"
+
+        x_path = os.path.join(self.data_dir, x_file)
+        y_path = os.path.join(self.data_dir, y_file)
+        tickers_path = os.path.join(self.data_dir, tickers_file)
+
+        if all(os.path.exists(p) for p in [x_path, y_path, tickers_path]):
+            self.logger.info(f"Loading cached data for tickers: {sorted_tickers[:num_assets]} from {start_date} to {end_date}")
+            with open(x_path, 'rb') as f:
+                X = pickle.load(f)
+            with open(y_path, 'rb') as f:
+                y = pickle.load(f)
+            with open(tickers_path, 'rb') as f:
+                loaded_tickers = pickle.load(f)
+            return X, y, loaded_tickers
+
         return None
-    
-    def _save_to_cache(self, key: str, data: Tuple):
-        """Save data to cache"""
-        try:
-            cache_path = self._get_cache_path(key, 'data')
-            with open(cache_path, 'wb') as f:
-                pickle.dump(data, f)
-        except Exception as e:
-            self.logger.warning(f"Cache save failed: {e}")
-    
-    def _load_tickers(self, num_assets: int) -> List[str]:
-        """Load SP500 tickers"""
-        with open('sp500tickers.txt', 'r') as f:
-            return [line.strip() for line in f.readlines()][:num_assets]
-    
-    def _download_data(self, 
-                      tickers: List[str], 
-                      start_date: str, 
-                      end_date: str) -> pd.DataFrame:
-        """Download data for given tickers"""
-        all_data = {}
-        
+
+    def _download_and_cache_data(self, tickers: List[str], num_assets: int, start_date: str, end_date: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Download data from yfinance and cache it."""
+        selected_tickers = []
+        all_prices = []
+        all_returns = []
+
         for ticker in tickers:
+            if len(selected_tickers) >= num_assets:
+                break  # Stop if desired number of assets is reached
             try:
-                stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-                if not stock_data.empty:
-                    all_data[ticker] = stock_data['Adj Close']
+                self.logger.info(f"Downloading {ticker}...")
+                # Download data with threads=False to prevent connection pool issues
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False, threads=False)
+                
+                if data.empty:
+                    self.logger.warning(f"Skipping {ticker}: No data downloaded.")
+                    continue
+
+                adj_close = data['Adj Close'].dropna()
+                if len(adj_close) < 30:
+                    self.logger.warning(f"Skipping {ticker}: Insufficient data points ({len(adj_close)}).")
+                    continue
+
+                # Calculate returns
+                returns = adj_close.pct_change().dropna().values
+                prices = adj_close.values[1:]  # Align with returns
+
+                if len(returns) == 0 or len(prices) == 0:
+                    self.logger.warning(f"Skipping {ticker}: No returns calculated.")
+                    continue
+
+                selected_tickers.append(ticker)
+                all_prices.append(prices)
+                all_returns.append(returns)
+                self.logger.info(f"Added {ticker}: {len(prices)} data points.")
+
+                # Optional: Add a small delay to prevent overwhelming the server
+                time.sleep(0.5)
+
             except Exception as e:
-                self.logger.warning(f"Error downloading {ticker}: {e}")
-        
-        return pd.DataFrame(all_data)
-    
-    def _process_data(self, 
-                     data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """Process raw data into prices and returns"""
-        prices = data.values
-        returns = (prices[1:] - prices[:-1]) / prices[:-1]
-        return prices, returns
-    
-    def _calculate_features(self, 
-                          prices: np.ndarray, 
-                          returns: np.ndarray) -> Dict[str, np.ndarray]:
-        """Calculate additional features"""
-        features = {}
-        
-        # Volatility
-        features['volatility'] = self._calculate_volatility(returns)
-        
-        # Moving averages
-        features['ma_50'] = self._calculate_ma(prices, 50)
-        features['ma_200'] = self._calculate_ma(prices, 200)
-        
-        # Momentum
-        features['momentum'] = self._calculate_momentum(prices)
-        
-        return features
-    
-    def _calculate_volatility(self, returns: np.ndarray, window: int = 20) -> np.ndarray:
-        """Calculate rolling volatility"""
-        return np.array([np.std(returns[max(0, i-window):i], axis=0) 
-                        for i in range(len(returns))])
-    
-    def _calculate_ma(self, prices: np.ndarray, window: int) -> np.ndarray:
-        """Calculate moving average"""
-        return np.array([np.mean(prices[max(0, i-window):i], axis=0) 
-                        for i in range(len(prices))])
-    
-    def _calculate_momentum(self, prices: np.ndarray, window: int = 20) -> np.ndarray:
-        """Calculate price momentum"""
-        return np.array([(prices[i] - prices[max(0, i-window)]) / prices[max(0, i-window)]
-                        for i in range(len(prices))])
+                self.logger.warning(f"Failed to download {ticker}: {str(e)}")
+
+        if len(selected_tickers) < num_assets:
+            self.logger.warning(f"Only found {len(selected_tickers)} assets with sufficient data, requested {num_assets}.")
+
+        if not selected_tickers:
+            raise ValueError("No valid tickers downloaded.")
+
+        # Find the minimum length to align all assets
+        min_length = min(len(prices) for prices in all_prices)
+
+        # Trim all arrays to the minimum length
+        X = np.column_stack([prices[-min_length:] for prices in all_prices])  # Shape: (num_days, num_assets)
+        y = np.column_stack([returns[-min_length:] for returns in all_returns])  # Shape: (num_days, num_assets)
+
+        # Save to cache
+        self._save_to_cache(X, y, selected_tickers, num_assets, start_date, end_date)
+
+        return X, y, selected_tickers
+
+    def _save_to_cache(self, X: np.ndarray, y: np.ndarray, tickers: List[str], 
+                      num_assets: int, start_date: str, end_date: str):
+        """Save data to cache."""
+        sorted_tickers = sorted(tickers)
+        tickers_key = '_'.join(sorted_tickers[:num_assets])
+        x_file = f"x_train_{tickers_key}_{start_date}_{end_date}.pkl"
+        y_file = f"y_train_{tickers_key}_{start_date}_{end_date}.pkl"
+        tickers_file = f"tickers_{tickers_key}_{start_date}_{end_date}.pkl"
+
+        x_path = os.path.join(self.data_dir, x_file)
+        y_path = os.path.join(self.data_dir, y_file)
+        tickers_path = os.path.join(self.data_dir, tickers_file)
+
+        with open(x_path, 'wb') as f:
+            pickle.dump(X, f)
+        with open(y_path, 'wb') as f:
+            pickle.dump(y, f)
+        with open(tickers_path, 'wb') as f:
+            pickle.dump(tickers, f)
+
+        self.logger.info(f"Saved data to cache: X shape {X.shape}, y shape {y.shape}, tickers {tickers}")
 
 def main():
-    """Example usage"""
+    """Example usage with sample data loading"""
+    # Configure root logger
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     data_manager = DataManager()
-    
-    # Load data
-    prices, returns, tickers = data_manager.load_data(
-        num_assets=10,
-        start_date="2020-01-01",
-        end_date="2022-12-31",
-        include_features=False
-    )
-    
-    print("\nData Loading Results:")
-    print(f"Number of assets: {len(tickers)}")
-    print(f"Price data shape: {prices.shape}")
-    print(f"Return data shape: {returns.shape}")
-    print("\nSample tickers:", tickers[:5])
+
+    # Define periods
+    periods = [
+        ("2020-01-01", "2022-12-31"),
+        ("2022-01-01", "2023-12-31")
+    ]
+
+    # Define a list of tickers (for simplicity, using a smaller list)
+    # You can adjust this list or read from 'sp500tickers.txt'
+    tickers = [
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'JPM', 'V', 'PG', 'MA',
+        'HD', 'BAC', 'CVX', 'KO', 'PFE', 'DIS', 'WMT', 'MRK', 'XOM', 'ORCL'
+    ]
+
+    for start_date, end_date in periods:
+        try:
+            num_assets = 10  # Change as needed
+            print(f"\nLoading data for period {start_date} to {end_date} with {num_assets} assets")
+            X, y, selected_tickers = data_manager.load_data(
+                tickers=tickers,
+                num_assets=num_assets,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+            print(f"Data shapes:")
+            print(f"X: {X.shape}")  # Expected: (num_days, num_assets)
+            print(f"y: {y.shape}")  # Expected: (num_days, num_assets)
+            print(f"Number of assets: {len(selected_tickers)}")
+            print(f"Sample tickers: {selected_tickers[:5]}")
+
+        except Exception as e:
+            print(f"Failed to load data for period {start_date} to {end_date}: {e}")
 
 if __name__ == "__main__":
-    main() 
+    main()

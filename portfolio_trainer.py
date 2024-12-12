@@ -190,59 +190,77 @@ class PortfolioTrainer:
         }
 
 def main():
-    """Example usage"""
-    # Load data
-    data_manager = DataManager()
-    train_data = data_manager.load_data(
-        num_assets=10,
-        start_date="2018-01-01",
-        end_date="2021-12-31"
-    )
-    val_data = data_manager.load_data(
-        num_assets=10,
-        start_date="2022-01-01",
-        end_date="2022-12-31"
-    )
-    
-    # Create config
-    config = EnvironmentConfig(
-        window_size=20,
-        num_assets=10
-    )
-    
-    # Model parameters
-    model_params = {
-        "learning_rate": 3e-4,
-        "n_steps": 2048,
-        "batch_size": 64,
-        "n_epochs": 10,
-        "gamma": 0.99,
-        "gae_lambda": 0.95,
-        "clip_range": 0.2,
-        "ent_coef": 0.01
-    }
-    
-    # Create trainer
-    trainer = PortfolioTrainer(
-        config=config,
-        model_params=model_params,
-        train_data=train_data,
-        val_data=val_data,
-        use_wandb=True
-    )
-    
-    # Train model
-    trainer.train(
-        total_timesteps=1_000_000,
-        eval_freq=10000,
-        save_path="./models"
-    )
-    
-    # Evaluate model
-    results = trainer.evaluate(n_episodes=10)
-    print("\nEvaluation Results:")
-    for metric, value in results.items():
-        print(f"{metric}: {value:.4f}")
+    """Example usage with robust error handling"""
+    try:
+        # Initialize data manager with logging
+        data_manager = DataManager()
+        
+        # Try loading training data
+        print("Loading training data...")
+        train_data = data_manager.load_data(
+            num_assets=10,
+            start_date="2018-01-01",
+            end_date="2021-12-31",
+            force_reload=True  # Force reload for testing
+        )
+        
+        print("Loading validation data...")
+        val_data = data_manager.load_data(
+            num_assets=10,
+            start_date="2022-01-01",
+            end_date="2022-12-31"
+        )
+        
+        # Validate data shapes
+        train_prices, train_returns, train_tickers = train_data
+        print(f"\nTraining Data Shapes:")
+        print(f"Prices: {train_prices.shape}")
+        print(f"Returns: {train_returns.shape}")
+        print(f"Tickers: {len(train_tickers)}")
+        
+        # Create config
+        config = EnvironmentConfig(
+            window_size=20,
+            num_assets=len(train_tickers)
+        )
+        
+        # Model parameters
+        model_params = {
+            "learning_rate": 3e-4,
+            "n_steps": 2048,
+            "batch_size": 64,
+            "n_epochs": 10,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.01
+        }
+        
+        # Create trainer
+        trainer = PortfolioTrainer(
+            config=config,
+            model_params=model_params,
+            train_data=train_data,
+            val_data=val_data,
+            use_wandb=True
+        )
+        
+        # Train model
+        trainer.train(
+            total_timesteps=1_000_000,
+            eval_freq=10000,
+            save_path="./models"
+        )
+        
+        # Evaluate model
+        results = trainer.evaluate(n_episodes=10)
+        print("\nEvaluation Results:")
+        for metric, value in results.items():
+            print(f"{metric}: {value:.4f}")
+            
+    except Exception as e:
+        print(f"Error in main: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
