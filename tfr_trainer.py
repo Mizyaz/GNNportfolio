@@ -1,255 +1,203 @@
-# trainer.py
 
 import gymnasium as gym
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_checker import check_env
-from financial_env import PortfolioEnv
-from tfr_financial_env import TFRPortfolioEnv
-from metrics_computer import MetricsComputer, MetricsConfig
-from time_frequency_analyser import TimeFrequencyAnalyser, TFAConfig
+from gymnasium.spaces import Box
 import numpy as np
 import pandas as pd
+import librosa
+from scipy import signal
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
 import yfinance as yf
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Dict, Any
-import warnings
+from experimental import max_sharpe_ratio, min_variance, risk_parity
+import os
+import seaborn as sns
 
-class PortfolioTrainer:
-    """
-    Trainer class to train RL agents for portfolio optimization.
-    """
-    def __init__(self, env_type: str = 'basic'):
-        """
-        Initialize the trainer.
-        
-        Args:
-            env_type (str): Type of environment ('basic' or 'tfr').
-        """
-        self.env_type = env_type
-        self.model = None
-        self.env = None
+from tfr_financial_env import SpectralPortfolioEnv
+
+def train_spectral_agent(data, start_train_idx, end_train_idx, start_test_idx, end_test_idx, risk_free_rate=0.0):
+    """Trains a PPO agent using spectral observations."""
+    env_train = lambda: SpectralPortfolioEnv(
+        data.iloc[start_train_idx:end_train_idx],
+        0,
+        len(data.iloc[start_train_idx:end_train_idx]) - 1,
+        risk_free_rate
+    )
+    env_train = DummyVecEnv([env_train])
+
+    # Modified network architecture for spectral inputs
+    policy_kwargs = dict(
+        net_arch=[dict(pi=[128, 64], vf=[128, 64])]
+    )
+
+    model = PPO(
+        'MlpPolicy',
+        env_train,
+        verbose=1,
+        learning_rate=0.0001,
+        gamma=0.99,
+        policy_kwargs=policy_kwargs
+    )
     
-    def download_data(self, tickers: List[str], start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Download and preprocess data from yfinance.
-        
-        Args:
-            tickers (List[str]): List of asset ticker symbols.
-            start_date (str): Start date (YYYY-MM-DD).
-            end_date (str): End date (YYYY-MM-DD).
-        
-        Returns:
-            Tuple[pd.DataFrame, pd.DataFrame]: Adjusted close prices and daily returns.
-        """
-        print("Downloading data from Yahoo Finance...")
-        data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
-        data.dropna(inplace=True)
-        returns = data.pct_change().dropna()
-        print("Data download complete.")
-        return data, returns
-    
-    def compute_equal_weight_cumulative_return(self, returns: pd.DataFrame, num_assets: int) -> float:
-        """
-        Compute the cumulative return of an equal-weighted portfolio.
-        
-        Args:
-            returns (pd.DataFrame): Daily returns of assets.
-            num_assets (int): Number of assets in the portfolio.
-        
-        Returns:
-            float: Cumulative return.
-        """
-        print("Computing equal-weighted cumulative return...")
-        equal_weights = np.ones(num_assets) / num_assets
-        portfolio_returns = returns.dot(equal_weights)
-        cumulative_return = (1 + portfolio_returns).prod() - 1
-        print(f"Equal-Weight Cumulative Return: {cumulative_return:.2%}")
-        return cumulative_return
-    
-    def initialize_environment(self, config: Dict[str, Any], prices: pd.DataFrame, returns: pd.DataFrame):
-        """
-        Initialize the chosen environment.
-        
-        Args:
-            config (Dict[str, Any]): Configuration dictionary for the environment.
-            prices (pd.DataFrame): Adjusted close prices.
-            returns (pd.DataFrame): Daily returns.
-        """
-        if self.env_type == 'basic':
-            self.env = PortfolioEnv(config=config, prices=prices, returns=returns)
-        elif self.env_type == 'tfr':
-            self.env = TFRPortfolioEnv(config=config, prices=prices, returns=returns)
-        else:
-            raise ValueError("Unsupported environment type. Choose 'basic' or 'tfr'.")
-        
-        # Check the environment
-        print("Checking environment compatibility...")
-        check_env(self.env, warn=True)
-        print("Environment is compatible.")
-    
-    def train(self, config: Dict[str, Any], prices: pd.DataFrame, returns: pd.DataFrame, ppo_config: Dict[str, Any], total_timesteps: int = 100000):
-        """
-        Train the PPO model.
-        
-        Args:
-            config (Dict[str, Any]): Configuration dictionary for the environment.
-            prices (pd.DataFrame): Adjusted close prices.
-            returns (pd.DataFrame): Daily returns.
-            ppo_config (Dict[str, Any]): Configuration dictionary for the PPO model.
-            total_timesteps (int): Number of timesteps to train.
-        """
-        # Initialize the environment
-        self.initialize_environment(config, prices, returns)
-        
-        # Initialize the PPO model
-        print("Initializing PPO model...")
-        self.model = PPO(
-            policy=ppo_config.get('policy', 'MlpPolicy'),
-            env=self.env,
-            verbose=ppo_config.get('verbose', 1),
-            learning_rate=ppo_config.get('learning_rate', 1e-4),
-            n_steps=ppo_config.get('n_steps', 2048),
-            batch_size=ppo_config.get('batch_size', 64),
-            n_epochs=ppo_config.get('n_epochs', 10),
-            gamma=ppo_config.get('gamma', 0.99),
-            gae_lambda=ppo_config.get('gae_lambda', 0.95),
-            clip_range=ppo_config.get('clip_range', 0.2),
-            ent_coef=ppo_config.get('ent_coef', 0.0),
-        )
-        print("PPO model initialized.")
-        
-        # Train the model
-        print(f"Starting training for {total_timesteps} timesteps...")
-        self.model.learn(total_timesteps=total_timesteps)
-        print("Training completed.")
-        
-        # Save the trained model
-        self.model.save("ppo_portfolio_optimizer")
-        print("Model saved as 'ppo_portfolio_optimizer.zip'")
-    
-    def evaluate(self, config: Dict[str, Any], prices: pd.DataFrame, returns: pd.DataFrame, episodes: int = 5):
-        """
-        Evaluate the trained model.
-        
-        Args:
-            config (Dict[str, Any]): Configuration dictionary for the environment.
-            prices (pd.DataFrame): Adjusted close prices.
-            returns (pd.DataFrame): Daily returns.
-            episodes (int): Number of episodes to evaluate.
-        """
-        # Re-initialize the environment for evaluation
-        self.initialize_environment(config, prices, returns)
-        
-        print(f"Evaluating the model over {episodes} episodes...")
-        for episode in range(episodes):
-            obs, info = self.env.reset()
-            done = False
-            truncated = False
-            total_reward = 0.0
-            while not done and not truncated:
-                action, _states = self.model.predict(obs, deterministic=True)
-                obs, reward, done, truncated, info = self.env.step(action)
-                total_reward += reward
-            print(f"Episode {episode + 1}: Total Return: {total_reward:.2%}")
-        
-        # Render the last episode's performance
-        print("Rendering portfolio performance...")
-        self.env.render()
-    
-    def run(self, tickers: List[str], start_date: str, end_date: str, config: Dict[str, Any], ppo_config: Dict[str, Any], total_timesteps: int = 100000, episodes: int = 5):
-        """
-        Full run: download data, compute equal-weighted return, train, evaluate.
-        
-        Args:
-            tickers (List[str]): List of asset ticker symbols.
-            start_date (str): Start date (YYYY-MM-DD).
-            end_date (str): End date (YYYY-MM-DD).
-            config (Dict[str, Any]): Configuration dictionary for the environment.
-            ppo_config (Dict[str, Any]): Configuration dictionary for the PPO model.
-            total_timesteps (int): Number of timesteps to train.
-            episodes (int): Number of episodes to evaluate.
-        """
-        # Download data
-        prices, returns = self.download_data(tickers, start_date, end_date)
-        
-        # Compute and print equal-weighted cumulative return
-        self.compute_equal_weight_cumulative_return(returns, config.get('num_assets', len(tickers)))
-        
-        # Train the model
-        self.train(config, prices, returns, ppo_config, total_timesteps)
-        
-        # Evaluate the model
-        self.evaluate(config, prices, returns, episodes)
+    model.learn(total_timesteps=500000)
+    return model
 
 def main():
     """
-    Example usage of the PortfolioTrainer with Time-Frequency Environment.
+    Main function implementing spectral portfolio optimization with comprehensive evaluation.
+    Compares traditional strategies against the spectral RL approach.
     """
-    # Define asset tickers and date range
-    tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'JPM', 'V', 'PG', 'MA']
-    start_date = '2020-01-01'
-    end_date = '2022-12-31'
+    # Configuration parameters
+    tickers = ['AAPL', 'MSFT', 'GOOG', 'AMZN', 'META']
+    start_date = '2021-01-01'
+    end_date = '2023-12-31'
+    risk_free_rate = 0.02  # Assuming 2% annual risk-free rate
+    initial_investment = 10000
     
-    # Define environment configuration
-    env_config = {
-        'window_size': 20,
-        'num_assets': 10,
-        'metrics_list': [
-            ('Sharpe_ratio', 1.0),
-            ('Sortino_ratio', 0.5),
-            ('Maximum_drawdown', -0.5),
-            ('Cumulative_returns', 1.0),
-            ('Portfolio_volatility', -0.3),
-            ('Alpha', 0.2),
-            ('Beta', 0.1),
-            ('Turnover_rate', -0.2),
-            ('Information_ratio', 0.3),
-            ('Diversification_metrics', 0.4),
-            ('Value_at_risk', -0.4),
-            ('Conditional_value_at_risk', -0.4),
-            ('Transaction_costs', -0.3),
-            ('Liquidity_metrics', 0.2),
-            ('Exposure_metrics', 0.2),
-            ('Drawdown_duration', -0.3)
-        ],
-        'risk_free_rate': 0.02,
-        'tfa_config': {
-            'n_mels': 40,
-            'n_fft': 2048,
-            'hop_length': 512,
-            'window': 'hann',
-            'fmax': None,
-            'entropy_bins': 10
-        }
-    }
+    print("Initializing Portfolio Optimization Analysis...")
+    print(f"Assets: {', '.join(tickers)}")
+    print(f"Period: {start_date} to {end_date}")
     
-    # Define PPO configuration
-    ppo_config = {
-        'policy': 'MultiInputPolicy',
-        'verbose': 1,
-        'learning_rate': 1e-4,
-        'n_steps': 2048,
-        'batch_size': 64,
-        'n_epochs': 10,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_range': 0.2,
-        'ent_coef': 0.0
-    }
+    # Data acquisition and preprocessing
+    try:
+        data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
+        if data.empty:
+            raise ValueError("No data downloaded")
+            
+        returns = data.pct_change().dropna()
+        mean_returns = returns.mean()
+        cov_matrix = returns.cov()
+        num_assets = len(returns.columns)
+        
+        print(f"\nData successfully loaded: {len(data)} trading days")
+    except Exception as e:
+        print(f"Error loading data: {str(e)}")
+        return
     
-    # Initialize the trainer with Time-Frequency Environment
-    trainer = PortfolioTrainer(env_type='tfr')
+    # Train-test split
+    split_ratio = 0.8
+    split_index = int(len(data) * split_ratio)
+    train_data = data[:split_index]
+    test_data = data[split_index:]
     
-    # Run the training and evaluation
-    trainer.run(
-        tickers=tickers,
-        start_date=start_date,
-        end_date=end_date,
-        config=env_config,
-        ppo_config=ppo_config,
-        total_timesteps=100000,
-        episodes=5
-    )
+    print("\nComputing traditional portfolio optimization strategies...")
+    
+    # Initialize portfolio tracker
+    portfolio_values = pd.DataFrame(index=test_data.index)
+    
+    # 1. Equal Weight Strategy
+    equal_weights = np.array([1/num_assets] * num_assets)
+    portfolio_values['Equal Weight'] = (1 + test_data.pct_change().dropna() @ equal_weights).cumprod() * initial_investment
+    
+    # 2. Maximum Sharpe Ratio Strategy
+    try:
+        max_sharpe = max_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate)
+        portfolio_values['Max Sharpe'] = (1 + test_data.pct_change().dropna() @ max_sharpe['x']).cumprod() * initial_investment
+        print("Maximum Sharpe Ratio weights computed")
+    except Exception as e:
+        print(f"Error computing Max Sharpe: {str(e)}")
+    
+    # 3. Minimum Variance Strategy
+    try:
+        min_var = min_variance(mean_returns, cov_matrix)
+        portfolio_values['Min Variance'] = (1 + test_data.pct_change().dropna() @ min_var['x']).cumprod() * initial_investment
+        print("Minimum Variance weights computed")
+    except Exception as e:
+        print(f"Error computing Min Variance: {str(e)}")
+    
+    # 4. Risk Parity Strategy
+    try:
+        risk_parity_weights = risk_parity(cov_matrix)
+        portfolio_values['Risk Parity'] = (1 + test_data.pct_change().dropna() @ risk_parity_weights).cumprod() * initial_investment
+        print("Risk Parity weights computed")
+    except Exception as e:
+        print(f"Error computing Risk Parity: {str(e)}")
+    
+    print("\nTraining Spectral RL Agent...")
+    
+    # Train spectral RL agent
+    try:
+        model = train_spectral_agent(data, 0, split_index-1, split_index, len(data)-1, risk_free_rate)
+        
+        # Evaluate RL agent on test set
+        env_test = SpectralPortfolioEnv(test_data, 0, len(test_data)-1, risk_free_rate)
+        obs, _ = env_test.reset()
+        done = False
+        rl_portfolio_values = [initial_investment]
+        rl_weights_history = []
+        
+        while not done:
+            action, _ = model.predict(obs)
+            obs, reward, done, _, info = env_test.step(action)
+            rl_portfolio_values.append(info['portfolio_value'])
+            rl_weights_history.append(info['weights'])
+            
+        portfolio_values['Spectral RL'] = pd.Series(rl_portfolio_values[1:], index=portfolio_values.index)
+        print("RL agent evaluation completed")
+        
+    except Exception as e:
+        print(f"Error in RL training/evaluation: {str(e)}")
+    
+    # Performance Analysis
+    print("\nComputing performance metrics...")
+    
+    performance_metrics = pd.DataFrame(columns=['Total Return (%)', 'Annual Return (%)',
+                                              'Volatility (%)', 'Sharpe Ratio', 'Max Drawdown (%)'])
+    
+    for strategy in portfolio_values.columns:
+        returns_series = portfolio_values[strategy].pct_change().dropna()
+        total_return = (portfolio_values[strategy].iloc[-1] / initial_investment - 1) * 100
+        annual_return = (1 + total_return/100) ** (252/len(returns_series)) - 1
+        volatility = returns_series.std() * np.sqrt(252) * 100
+        sharpe = (annual_return - risk_free_rate) / (volatility/100) if volatility != 0 else 0
+        drawdown = ((portfolio_values[strategy].cummax() - portfolio_values[strategy]) / 
+                   portfolio_values[strategy].cummax()).max() * 100
+        
+        performance_metrics.loc[strategy] = [
+            round(total_return, 2),
+            round(annual_return * 100, 2),
+            round(volatility, 2),
+            round(sharpe, 2),
+            round(drawdown, 2)
+        ]
+    
+    # Visualization
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+    
+    # Portfolio Values Plot
+    portfolio_values.plot(ax=ax1)
+    ax1.set_title('Portfolio Value Over Time')
+    ax1.set_xlabel('Date')
+    ax1.set_ylabel('Portfolio Value ($)')
+    ax1.grid(True)
+    
+    # Performance Metrics Plot
+    performance_metrics[['Total Return (%)', 'Sharpe Ratio']].plot(kind='bar', ax=ax2)
+    ax2.set_title('Strategy Performance Comparison')
+    ax2.set_ylabel('Metric Value')
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print detailed performance metrics
+    print("\nDetailed Performance Metrics:")
+    print(performance_metrics.to_string())
+    
+    # Save results
+    try:
+        results_dir = "portfolio_results"
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Save performance metrics
+        performance_metrics.to_csv(f"{results_dir}/performance_metrics.csv")
+        
+        # Save portfolio values
+        portfolio_values.to_csv(f"{results_dir}/portfolio_values.csv")
+        
+        print(f"\nResults saved to {results_dir}/")
+    except Exception as e:
+        print(f"Error saving results: {str(e)}")
 
 if __name__ == "__main__":
     main()
