@@ -7,6 +7,7 @@ import pandas as pd
 from typing import List, Tuple, Dict, Any
 import matplotlib.pyplot as plt
 from metrics_computer import MetricsComputer, MetricsConfig
+from observation.hht import mean_instantaneous_freq, mean_instantaneous_amp
 import warnings
 
 class PortfolioEnv(gym.Env):
@@ -35,6 +36,7 @@ class PortfolioEnv(gym.Env):
         self.num_assets = config.get('num_assets', 10)
         self.metrics_list = config.get('metrics_list', [])
         self.risk_free_rate = config.get('risk_free_rate', 0.02)
+        self.compute_hht = config.get('compute_hht', False)
         
         # Data
         self.prices = prices.reset_index(drop=True)
@@ -48,13 +50,20 @@ class PortfolioEnv(gym.Env):
         # Actions are the weights allocated to each asset
         self.action_space = spaces.Box(low=0, high=1, shape=(self.num_assets,), dtype=np.float32)
         
+
+        obs_dict = {
+            'prices': spaces.Box(low=0, high=np.inf, shape=(self.window_size, self.num_assets), dtype=np.float32),
+            'returns': spaces.Box(low=-1, high=1, shape=(self.window_size, self.num_assets), dtype=np.float32),
+        }
+
+        if self.compute_hht:
+            obs_dict["mean_instantaneous_freq"] = spaces.Box(low=0, high=np.inf, shape=(self.num_assets,), dtype=np.float32)
+            obs_dict["mean_instantaneous_amp"] = spaces.Box(low=0, high=np.inf, shape=(self.num_assets,), dtype=np.float32)
+
         # Observations are a dict containing:
         # - 'prices': past window_size days' prices
         # - 'returns': past window_size days' returns
-        self.observation_space = spaces.Dict({
-            'prices': spaces.Box(low=0, high=np.inf, shape=(self.window_size, self.num_assets), dtype=np.float32),
-            'returns': spaces.Box(low=-1, high=1, shape=(self.window_size, self.num_assets), dtype=np.float32)
-        })
+        self.observation_space = spaces.Dict(obs_dict)
         
         # Initialize state variables
         self.current_step = self.window_size
@@ -98,10 +107,19 @@ class PortfolioEnv(gym.Env):
         """
         obs_prices = self.prices.iloc[self.current_step - self.window_size:self.current_step].values
         obs_returns = self.returns.iloc[self.current_step - self.window_size:self.current_step].values
-        return {
+
+        return_dict = {
             'prices': obs_prices.astype(np.float32),
             'returns': obs_returns.astype(np.float32)
         }
+
+        if self.compute_hht:
+            datas = [self.prices.iloc[self.current_step - self.window_size:self.current_step].pct_change().dropna().values[:, i] for i in range(self.num_assets)]
+
+            return_dict["mean_instantaneous_freq"] = np.array([mean_instantaneous_freq(data) for data in datas], dtype=np.float32)
+            return_dict["mean_instantaneous_amp"] = np.array([mean_instantaneous_amp(data) for data in datas], dtype=np.float32)
+
+        return return_dict
     
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         """
@@ -149,7 +167,9 @@ class PortfolioEnv(gym.Env):
         else:
             observation = {
                 'prices': np.zeros((self.window_size, self.num_assets), dtype=np.float32),
-                'returns': np.zeros((self.window_size, self.num_assets), dtype=np.float32)
+                'returns': np.zeros((self.window_size, self.num_assets), dtype=np.float32),
+                'mean_instantaneous_freq': np.zeros(1, dtype=np.float32),
+                'mean_instantaneous_amp': np.zeros(1, dtype=np.float32)
             }
         
         # Update previous weights

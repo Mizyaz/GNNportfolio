@@ -11,6 +11,9 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Dict, Any
 import warnings
+import pickle 
+import time
+import os
 
 class TrainingCallback(gym.Wrapper):
     """
@@ -53,6 +56,7 @@ class PortfolioTrainer:
         self.ppo_config = ppo_config
         self.model = None
         self.env = None
+        self.name = ppo_config.get('name', 'nameless')
     
     def download_data(self, tickers: List[str], start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -146,9 +150,16 @@ class PortfolioTrainer:
         print("Training completed.")
         
         # Save the trained model
-        self.model.save("ppo_portfolio_optimizer")
-        print("Model saved as 'ppo_portfolio_optimizer.zip'")
+        self.model.save(f"{self.name}_ppo_portfolio_optimizer")
+
+        print(f"Model saved as '{self.name}_ppo_portfolio_optimizer.zip'")
     
+        with open(f"{self.name}_ppo_config.pkl", "wb") as f:
+            pickle.dump(self.ppo_config, f)
+
+        with open(f"{self.name}_env_config.pkl", "wb") as f:
+            pickle.dump(self.env_config, f)
+
     def evaluate(self, returns: pd.DataFrame, episodes: int = 5):
         """
         Evaluate the trained model.
@@ -204,7 +215,7 @@ if __name__ == "__main__":
                'NVDA', 'TSLA', 'JPM', 'JNJ', 'PG']
     
     # Time period for training
-    start_date = "2015-01-01"
+    start_date = "2017-01-01"
     end_date = "2018-01-01"
 
     test_start_date = "2018-01-01"
@@ -212,7 +223,7 @@ if __name__ == "__main__":
     
     # Environment configuration
     env_config = {
-        'window_size': 30,  # Number of days to look back
+        'window_size': 7,  # Number of days to look back
         'num_assets': len(tickers),
         'risk_free_rate': 0.02,  # 2% annual risk-free rate
         'metrics_list': [
@@ -221,12 +232,14 @@ if __name__ == "__main__":
             ('maximum_drawdown', -0.02),      # 20% weight (negative weight as we want to minimize)
             ('portfolio_volatility', -0.01),  # 10% weight (negative weight as we want to minimize)
             ('cumulative_returns', 0.02),     # 20% weight
-        ]
+        ],
+        'compute_hht': True,
     }
     
     # PPO model configuration
     ppo_config = {
         'policy': 'MultiInputPolicy',
+        'name': 'hilbert',
         'verbose': 1,
         'learning_rate': 3e-4,
         'n_steps': 2048,
@@ -243,15 +256,25 @@ if __name__ == "__main__":
         'total_timesteps': 100000,  # Total timesteps for training
         'eval_episodes': 5,         # Number of episodes for evaluation
     }
-    
-    # Initialize and run the trainer
-    trainer = PortfolioTrainer(env_config=env_config, ppo_config=ppo_config)
-    trainer.run(
-        tickers=tickers,
-        start_date=start_date,
-        end_date=end_date,
-        test_start_date=test_start_date,
-        test_end_date=test_end_date,
-        total_timesteps=training_params['total_timesteps'],
-        episodes=training_params['eval_episodes']
-    )
+
+    for compute_hht in [True, False]:
+        env_config['compute_hht'] = compute_hht
+
+        print("test with hht: ", env_config['compute_hht'])
+
+        start_time = time.time()
+        
+        # Initialize and run the trainer
+        trainer = PortfolioTrainer(env_config=env_config, ppo_config=ppo_config)
+        trainer.run(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            test_start_date=test_start_date,
+            test_end_date=test_end_date,
+            total_timesteps=training_params['total_timesteps'],
+            episodes=training_params['eval_episodes']
+        )
+        end_time = time.time()
+        print(f"Total time taken: {end_time - start_time:.2f} seconds")
+
