@@ -1,0 +1,24 @@
+# Core Scientific Python Stack
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+
+# Deep Learning & Machine Learning
+torch>=1.10.0
+torch-geometric>=2.0.0
+stable-baselines3>=2.0.0
+sb3-contrib>=2.0.0
+gymnasium>=0.28.1
+
+# Financial Libraries
+yfinance>=0.2.0
+pypfopt>=1.5.0
+
+# Visualization
+plotext>=5.2.8
+
+# Technical Analysis
+ta-lib>=0.4.24
+
+# Optional Dependencies
+scikit-learn>=1.0.0  # For some statistical operations 
