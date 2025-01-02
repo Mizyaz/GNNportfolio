@@ -99,7 +99,7 @@ def main():
 
     # Define portfolio configuration
     config = PortfolioConfig(
-        window_size=30,
+        window_size=7,
         num_assets=prices.shape[1],
         initial_balance=initial_balance,
         risk_free_rate=0.02,
@@ -107,17 +107,13 @@ def main():
         use_technical_indicators=True,
         use_correlation_features=True,
         use_risk_metrics=True,
-        use_time_freq=True,
+        use_time_freq=False,
         reward_config=RewardConfig(
-                rewards=[
-                (compute_sharpe, 1.0, {"window": 20, "risk_free_rate": 0.02, "scaling_factor": 1.0}),
-                (compute_sortino, 0.5, {"window": 20, "risk_free_rate": 0.02, "scaling_factor": 1.0}),
-                (compute_max_drawdown_reward, 0.3, {"lookback": 50, "scaling_factor": 0.1}),
-                (compute_calmar_ratio_reward, 0.2, {"window": 252, "risk_free_rate": 0.02, "scaling_factor": 1.0}),
-                (compute_var, -0.1, {"window": 20, "confidence": 0.95, "scaling_factor": 1.0}),
-                (compute_cvar, -0.2, {"window": 20, "confidence": 0.95, "scaling_factor": 1.0}),
-                (compute_average_return, 0.4, {"window": 20, "scaling_factor": 1.0}),
-                (compute_return_variance, -0.3, {"window": 20, "scaling_factor": 1.0}),
+            rewards=[
+                (compute_sharpe, 0.4, {"window": 7, "scaling_factor": 0.5}),
+                (compute_sortino, 0.1, {"window": 7, "scaling_factor": 0.5}),
+                (compute_max_drawdown_reward, 0.1, {"lookback": 7, "scaling_factor": 0.2}),
+                (compute_average_return, 0.4, {"window": 7, "scaling_factor": 0.5}),
             ]
         ),
         use_per_episode_plot=False
@@ -139,12 +135,12 @@ def main():
 
     start_time = time.time()
     # Initialize the RL agent (PPO with MultiInputPolicy to handle Dict observation space)
-    model = TRPO(
+    model = PPO(
         "MultiInputPolicy",
         vec_env,
         verbose=1,
         tensorboard_log="./ppo_portfolio_tensorboard/",
-        learning_rate=0.0001
+        learning_rate=0.001
     )
 
     # Define training parameters
